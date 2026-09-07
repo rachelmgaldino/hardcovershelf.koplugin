@@ -36,6 +36,7 @@ local EBOOK_FORMAT_ID = 4
 
 local SEARCH_ROW_ID = "__search__"
 local BACK_ROW_ID = "__back__"
+local REFRESH_ROW_ID = "__refresh__"
 
 -- reading_format_id == nil (edition has no format set) is kept, same
 -- reasoning as filterByLanguage below: unset isn't the same as "wrong".
@@ -172,6 +173,7 @@ end
 function ShelfUI:_shelfItemTable(books)
   local item_table = {
     { text = _("+ Search & add a book"), row_id = SEARCH_ROW_ID },
+    { text = _("Refresh"), row_id = REFRESH_ROW_ID },
   }
   for _, book in ipairs(books) do
     table.insert(item_table, bookListItem(book))
@@ -216,21 +218,33 @@ function ShelfUI:showStatusPicker(book_id, title, edition_id, on_done)
     end
 
     local result = Api:updateUserBook(book_id, status_id, nil, edition_id)
-    if result then
-      UIManager:show(InfoMessage:new{
-        text = title .. ": " .. status_labels[status_id],
-        timeout = 2,
-      })
-    else
+    local marking_read = result and status_id == CONST.STATUS.FINISHED
+
+    if not result then
       UIManager:show(InfoMessage:new{
         text = _("Could not update status. Try again."),
         icon = "notice-warning",
       })
+      on_done()
+      return
     end
 
-    if result and status_id == CONST.STATUS.FINISHED then
-      self:showRatingPicker(result.id, title, on_done)
+    if marking_read then
+      -- Deferred until the rating picker closes, not shown here -- showing
+      -- both at once left this toast sitting on top of the rating picker
+      -- for its whole 2s timeout instead of the two being sequential.
+      self:showRatingPicker(result.id, title, function()
+        UIManager:show(InfoMessage:new{
+          text = title .. ": " .. status_labels[status_id],
+          timeout = 2,
+        })
+        on_done()
+      end)
     else
+      UIManager:show(InfoMessage:new{
+        text = title .. ": " .. status_labels[status_id],
+        timeout = 2,
+      })
       on_done()
     end
   end
@@ -506,6 +520,10 @@ function ShelfUI:show(in_book)
   local opened = self:_openOverlayList(_("Currently Reading"), self:_shelfItemTable(books), in_book, function(item)
     if item.row_id == SEARCH_ROW_ID then
       self:showSearchDialog(in_book)
+      return
+    end
+    if item.row_id == REFRESH_ROW_ID then
+      self:_refreshShelf()
       return
     end
     self:showStatusPicker(item.book_id, item.text, nil, function()

@@ -30,3 +30,8 @@
   refresh on show/close.
 - Known temporary state: the search dialog pre-fills a test query, needs
   removing before this is finished.
+- Added a pinned Refresh row on the shelf page, to re-fetch the Currently
+  Reading list without leaving the plugin.
+- Fixed the "Title: Read" status toast showing at the same time as the
+  rating picker, blocking it for a couple seconds. Now shown after the
+  rating picker closes instead of being shown, or dropped, alongside it.
