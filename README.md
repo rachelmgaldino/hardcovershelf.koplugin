@@ -32,11 +32,11 @@ Open `hardcovershelf_config.lua` and paste in a Hardcover API token, replacing t
 
 `lib/hardcover_api.lua` is a trimmed, adapted copy of `hardcoverapp.koplugin`'s own GraphQL client (MIT-licensed, see `THIRD_PARTY_NOTICES.md`), not a runtime dependency on that plugin being installed, since KOReader plugins can't cleanly `require()` each other's internals across plugin folders. Its config file is named `hardcovershelf_config.lua` rather than `hardcover_config.lua` for a specific reason: KOReader merges every installed plugin's root folder into one shared `package.path` after startup, so two plugins both naming a config module `hardcover_config` would collide in Lua's `require` cache, and one would silently load the other's token.
 
-The shelf renders through KOReader's core `Menu` widget, configured differently depending on where it's opened from. Inside a book it opens as a centered popout (reduced width, wrapped in a `CenterContainer`) sitting on top of the page being read. From the file manager it opens `is_popout = false` and `is_borderless = true` at full size instead, a true edge-to-edge page rather than a shrunk widget stretched wide. `Menu`'s own default corner radius scales with its width regardless of size, so leaving those settings at their default produces a wrong-looking radius once the same widget fills the whole screen.
+The shelf renders through a small custom list widget (`lib/book_list.lua`) rather than KOReader's core `Menu`, which has no way to render a styled child widget per row (its secondary-text field is hard-coerced into a plain `TextWidget`). The list is configured differently depending on where it's opened from: inside a book it opens as a centered popout sitting on top of the page being read; from the file manager it opens as a true edge-to-edge page instead.
 
 Adding a book from search fetches every edition Hardcover has for it and filters to ebook format in English by default, both changeable from the same screen, falling back to other formats or languages with an explicit notice when nothing narrower exists yet. Hardcover's own `insert_user_book` mutation will otherwise silently pick an edition with no input at all.
 
-A book that's part of a series shows its position and series name pulled straight from the book's own data. It deliberately doesn't show a "book N of M" total the way Hardcover's own site does: release-date data in the underlying catalog has a real ambiguity between "exact release day unknown" and "placeholder for an unconfirmed future book" that no field distinguishes, so a computed total would be right most of the time and silently wrong the rest of the time.
+A book that's part of a series shows its position and series name as a rounded-corner tag next to the title and author. It deliberately doesn't show a "book N of M" total the way Hardcover's own site does: release-date data in the underlying catalog has a real ambiguity between "exact release day unknown" and "placeholder for an unconfirmed future book" that no field distinguishes, so a computed total would be right most of the time and silently wrong the rest of the time.
 
 ## Known v1 limitations
 
@@ -58,6 +58,7 @@ hardcovershelf.koplugin/
     ├── hardcover_api.lua            (GraphQL client)
     ├── table_util.lua               (small table helpers)
     ├── constants.lua                (status id constants)
+    ├── book_list.lua                (custom scrollable list widget)
     └── shelf_ui.lua                 (every screen: shelf, search, edition
                                        picker, status picker, rating)
 ```

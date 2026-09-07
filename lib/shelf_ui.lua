@@ -1,24 +1,19 @@
 local ButtonDialog = require("ui/widget/buttondialog")
-local CenterContainer = require("ui/widget/container/centercontainer")
-local Device = require("device")
-local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local Menu = require("ui/widget/menu")
 local NetworkManager = require("ui/network/manager")
 local SpinWidget = require("ui/widget/spinwidget")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 
 local Api = require("lib/hardcover_api")
+local BookList = require("lib/book_list")
 local CONST = require("lib/constants")
-
-local Screen = Device.screen
 
 local ShelfUI = {
   -- kept so a status/rating change made from a nested overlay can refresh
-  -- the shelf list in place instead of closing and reopening the page.
-  _shelf_menu = nil,
+  -- the shelf list by closing and reopening the page.
+  _shelf_widget = nil,
   _in_book = false,
 }
 
@@ -92,24 +87,21 @@ local function seriesLabel(book)
   if not entry or not entry.position or not entry.series then
     return nil
   end
-  return "#" .. tostring(entry.position) .. " in " .. entry.series.name
+  return entry.series.name .. ", #" .. tostring(entry.position)
 end
 
--- One plain line for now: title - series - author, when each piece is
--- present. Not trying to match Hardcover's own 3-line badge/title/author
--- layout yet -- that's a separate pass once the data itself is right.
+-- "Title - Author" as the main line; series (when present) renders as its
+-- own rounded-corner tag underneath, via BookList/book_list.lua's
+-- series_tag field, rather than being folded into the text line.
 local function bookListItem(book)
   local text = book.title
-  local series = seriesLabel(book)
-  if series then
-    text = text .. " - " .. series
-  end
   local author = mainAuthor(book)
   if author then
     text = text .. " - " .. author
   end
   return {
     text = text,
+    series_tag = seriesLabel(book),
     book_id = book.book_id,
   }
 end
@@ -146,74 +138,35 @@ function ShelfUI:requireNetwork()
   return true
 end
 
--- Menu widget defaults to is_popout=true, which draws a corner radius
--- proportional to its own width (menu.lua:917) no matter what `fullscreen`
--- is set to -- fine for a normal popout, wrong once the widget is also
--- sized to the full screen. So the two presentations need different
--- constructor fields, not just a size difference. A reduced-size Menu also
--- needs an explicit CenterContainer wrapper (menu.lua positions itself at
--- x=0,y=0 by default -- hardcoverapp's own search_dialog.lua does the same
--- wrap) or it renders pinned to the top-left instead of centered.
---   in_book:       a centered popout sitting on top of the book you're
---                   reading, sized like hardcoverapp's own search dialog.
---   file manager:   a true edge-to-edge page (like Rakuyomi's library
---                   view), no border, no radius.
-function ShelfUI:_showMenu(menu, in_book)
-  if not in_book then
-    UIManager:show(menu)
-    return menu
-  end
-  local wrapper = CenterContainer:new{
-    dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() },
-    menu,
-  }
-  UIManager:show(wrapper)
-  return wrapper
+-- Builds and shows the custom list (lib/book_list.lua) as an overlay ON
+-- TOP of whatever's currently shown (the shelf page underneath is never
+-- closed for this), returning the widget passed to UIManager:show, for
+-- closing later.
+--
+-- "full" refresh type on both show and close: e-ink partial refresh only
+-- redraws the specific region UIManager computes as dirty, and stacking a
+-- second full-page custom widget on top of the shelf (never closed) was
+-- leaving the shelf's own rows visibly ghosted through on top. Forcing a
+-- full screen redraw sidesteps needing that computed region to be exactly
+-- right.
+function ShelfUI:_openOverlayList(title, item_table, in_book, on_select)
+  local widget
+  widget = BookList.build(title, item_table, in_book, on_select, function()
+    UIManager:close(widget, "full")
+  end)
+  UIManager:show(widget, "full")
+  return { widget = widget }
 end
 
-function ShelfUI:_menuFields(in_book)
-  if in_book then
-    local w = math.min(Screen:getWidth() - Screen:scaleBySize(50), Screen:scaleBySize(600))
-    return {
-      width = w,
-      height = Screen:getHeight() - Screen:scaleBySize(50),
-    }
-  end
-  return {
-    is_popout = false,
-    is_borderless = true,
-  }
-end
-
--- Builds and shows a Menu as an overlay ON TOP of whatever's currently
--- shown (the shelf page underneath is never closed for this), returning
--- {menu = <Menu>, widget = <what was actually passed to UIManager:show,
--- for closing>}.
-function ShelfUI:_openOverlayMenu(title, item_table, in_book, on_select)
-  local fields = self:_menuFields(in_book)
-  local menu
-  menu = Menu:new{
-    title = title,
-    item_table = item_table,
-    width = fields.width,
-    height = fields.height,
-    is_popout = fields.is_popout,
-    is_borderless = fields.is_borderless,
-    onMenuSelect = function(_, item)
-      on_select(item, menu)
-    end,
-  }
-  local widget = self:_showMenu(menu, in_book)
-  return { menu = menu, widget = widget }
-end
-
+-- No live in-place update on this custom list (unlike stock Menu's
+-- switchItemTable), so refreshing the shelf means closing and rebuilding
+-- it -- simple, and the shelf is cheap enough to rebuild that this isn't
+-- worth optimizing away.
 function ShelfUI:_refreshShelf()
-  if not self._shelf_menu then
-    return
+  if self._shelf_widget then
+    UIManager:close(self._shelf_widget, "full")
   end
-  local user_id = Api:getUserId()
-  local books = (user_id and Api:listByStatus(CONST.STATUS.READING, user_id)) or {}
-  self._shelf_menu:switchItemTable(_("Currently Reading"), self:_shelfItemTable(books))
+  self:show(self._in_book)
 end
 
 function ShelfUI:_shelfItemTable(books)
@@ -450,8 +403,8 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
   end
 
   local opened
-  opened = self:_openOverlayMenu(_("Select edition: ") .. title, item_table, in_book, function(item)
-    UIManager:close(opened.widget)
+  opened = self:_openOverlayList(_("Select edition: ") .. title, item_table, in_book, function(item)
+    UIManager:close(opened.widget, "full")
     if item.row_id == LANGUAGE_ROW_ID then
       self:showLanguageChooser(book_id, title, in_book, on_done, language_filter)
       return
@@ -516,12 +469,12 @@ function ShelfUI:runSearch(query, in_book)
   end
 
   local opened
-  opened = self:_openOverlayMenu(_("Search results"), item_table, in_book, function(item)
+  opened = self:_openOverlayList(_("Search results"), item_table, in_book, function(item)
     if item.row_id == BACK_ROW_ID then
-      UIManager:close(opened.widget)
+      UIManager:close(opened.widget, "full")
       return
     end
-    UIManager:close(opened.widget)
+    UIManager:close(opened.widget, "full")
     self:pickEditionThenStatus(item.book_id, item.text, in_book, function()
       self:_refreshShelf()
     end)
@@ -550,7 +503,7 @@ function ShelfUI:show(in_book)
 
   local books = Api:listByStatus(CONST.STATUS.READING, user_id) or {}
 
-  local opened = self:_openOverlayMenu(_("Currently Reading"), self:_shelfItemTable(books), in_book, function(item)
+  local opened = self:_openOverlayList(_("Currently Reading"), self:_shelfItemTable(books), in_book, function(item)
     if item.row_id == SEARCH_ROW_ID then
       self:showSearchDialog(in_book)
       return
@@ -559,7 +512,7 @@ function ShelfUI:show(in_book)
       self:_refreshShelf()
     end)
   end)
-  self._shelf_menu = opened.menu
+  self._shelf_widget = opened.widget
 end
 
 return ShelfUI
