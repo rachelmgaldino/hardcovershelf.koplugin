@@ -35,3 +35,7 @@
 - Fixed the "Title: Read" status toast showing at the same time as the
   rating picker, blocking it for a couple seconds. Now shown after the
   rating picker closes instead of being shown, or dropped, alongside it.
+- Fixed the rating picker's Save button being permanently disabled at the
+  default 2.5 rating: `SpinWidget` only enables Save once the value
+  differs from its starting point unless told otherwise, and there's never
+  a pre-existing rating being edited here.

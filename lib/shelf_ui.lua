@@ -196,6 +196,11 @@ function ShelfUI:showRatingPicker(user_book_id, title, on_done)
     precision = "%.1f",
     ok_text = _("Save"),
     cancel_text = _("Skip"),
+    -- SpinWidget disables Save unless the value differs from its starting
+    -- point (spinwidget.lua: enabled = ok_always_enabled or original_value
+    -- ~= current). There's never a pre-existing rating being edited here,
+    -- so any value, including the untouched default, is a legitimate save.
+    ok_always_enabled = true,
     callback = function(spin)
       if not self:requireNetwork() then
         return
