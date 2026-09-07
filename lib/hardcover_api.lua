@@ -266,6 +266,14 @@ end
 -- (Want to Read / Currently Reading / Read / DNF, see lib/constants.lua),
 -- newest-linked first. Modeled on hardcoverapp's getRandomToRead, which
 -- does the same status_id filter but only for a random Want-to-Read pick.
+-- Pulled but not rendered anywhere yet: progress_pages/started_at from
+-- Hardcover's own user_book_reads (the structure hardcoverapp itself
+-- writes to, which this plugin's own updateUserBook/updateRating never
+-- touch, so this is read-only against whatever hardcoverapp or the
+-- Hardcover website already recorded). limit: 1, order_by desc gets the
+-- most recent read session per book, which is what "current progress"
+-- means for a book with more than one (a re-read, or a paused-then-resumed
+-- one).
 function HardcoverApi:listByStatus(status_id, user_id)
   -- status_id is interpolated as a literal, not a $variable -- matching
   -- hardcoverapp's own getRandomToRead (hardcover_api.lua:404-427), which
@@ -279,6 +287,11 @@ function HardcoverApi:listByStatus(status_id, user_id)
         order_by: { id: desc }
       ) {
         book_id
+        user_book_reads(order_by: { id: desc }, limit: 1) {
+          started_at
+          finished_at
+          progress_pages
+        }
       }
     }
   ]], status_id)
@@ -289,7 +302,27 @@ function HardcoverApi:listByStatus(status_id, user_id)
   end
 
   local ids = _t.map(results.user_books, function(r) return tonumber(r.book_id) end)
-  return self:hydrateBooks(ids, user_id)
+  local books = self:hydrateBooks(ids, user_id)
+  if not books then
+    return books, err
+  end
+
+  -- Merge each user_book's latest read session back onto its hydrated
+  -- book record (hydrateBooks itself only returns book-level fields, not
+  -- anything from user_books) so it travels with the book without
+  -- changing hydrateBooks' own, more widely-used, shape.
+  local reads_by_book_id = {}
+  for _, ub in ipairs(results.user_books) do
+    local read = ub.user_book_reads and ub.user_book_reads[1]
+    if read then
+      reads_by_book_id[tonumber(ub.book_id)] = read
+    end
+  end
+  for _, book in ipairs(books) do
+    book.reading_progress = reads_by_book_id[book.book_id]
+  end
+
+  return books
 end
 
 function HardcoverApi:findUserBook(book_id, user_id)

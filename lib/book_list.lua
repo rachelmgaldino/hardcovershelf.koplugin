@@ -7,8 +7,12 @@ to get a real rounded-corner background tag into a stock Menu row without
 either vendoring a huge replacement (the ~1000-line approach hardcoverapp
 and bookends both took for their own fancier lists) or building just
 enough of a list ourselves. This is the second option, scoped to exactly
-what this plugin needs: a title/author line and an optional series tag
-per row, nothing else.
+what this plugin needs.
+
+Layout constants below are pulled directly from the design handoff's own
+HTML/CSS (design_handoff_hardcover_shelf/Hardcover Shelf.dc.html), not
+estimated from the screenshots, and run through Screen:scaleBySize() the
+same way every other literal size in this codebase is.
 --]]--
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -20,43 +24,317 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
+local IconButton = require("ui/widget/iconbutton")
+local IconWidget = require("ui/widget/iconwidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
+local OverlapGroup = require("ui/widget/overlapgroup")
+local ProgressWidget = require("ui/widget/progresswidget")
+local RightContainer = require("ui/widget/container/rightcontainer")
 local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
-local TitleBar = require("ui/widget/titlebar")
 local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
+local _ = require("gettext")
 
 local Screen = Device.screen
+local S = function(px) return Screen:scaleBySize(px) end
 
-local ROW_V_PADDING = Size.padding.default
-local ROW_H_PADDING = Size.padding.large
-local TAG_GAP = Size.padding.default
+-- Serif faces for book-like typography (title/author), matching the
+-- design handoff's "Georgia in the mock -- substitute KOReader's default
+-- serif" instruction. Font:getFace falls back to using its first argument
+-- directly as a font filename when it's not a name in the fontmap table
+-- (confirmed: ui/font.lua's getFace tries FontList.fontdir.."/"..realname
+-- first, then searches every font folder for it -- these three files are
+-- on disk under fonts/noto/), so passing the bare filename here is a real,
+-- working way to get serif text rather than the sans-only named faces
+-- ("cfont" etc.) every other named face in this codebase maps to.
+local SERIF_BOLD = "NotoSerif-Bold.ttf"
+local SERIF_ITALIC = "NotoSerif-Italic.ttf"
 
--- A rounded-corner background pill, e.g. "A Song of Ice and Fire, #1".
--- Any KOReader widget with a `background` color draws with
--- `Size.radius.button` corners (confirmed in ui/widget/button.lua), so
--- this is just that same recipe applied directly via FrameContainer
--- rather than going through the interactive Button widget itself.
+-- Ink colors, matched to the design tokens' exact hex values against
+-- KOReader's fixed 16-shade grayscale palette (ffi/blitbuffer.lua):
+-- #1a1a1a (primary ink/borders) -> COLOR_BLACK, #555555 (author) ->
+-- COLOR_GRAY_5 (0x55, an exact match), #777777 (meta/labels) ->
+-- COLOR_GRAY_7 (0x77, exact), #999999 (chevron) -> COLOR_GRAY_9 (0x99,
+-- exact), #dddddd (row dividers) -> COLOR_GRAY_D, #eeeeee (subheader
+-- hairline) -> COLOR_GRAY_E, #cccccc (header hairline) -> COLOR_LIGHT_GRAY.
+local INK = Blitbuffer.COLOR_BLACK
+local AUTHOR_COLOR = Blitbuffer.COLOR_GRAY_5
+local META_COLOR = Blitbuffer.COLOR_GRAY_7
+local ROW_DIVIDER_COLOR = Blitbuffer.COLOR_GRAY_D
+local HEADER_DIVIDER_COLOR = Blitbuffer.COLOR_LIGHT_GRAY
+local SUBHEADER_DIVIDER_COLOR = Blitbuffer.COLOR_GRAY_E
+local BORDER = S(1.5)
+
+-- ---- Header (title row) ------------------------------------------------
+-- Two header shapes in the design, not one: the shelf spreads its title
+-- to the left edge and a button row to the right ("spread"); search and
+-- the language picker put a single back-chevron button and the title
+-- side by side at the left edge instead ("leading"). Forcing both through
+-- one shape was the actual bug in the previous pass -- the search
+-- header's back button was being pinned to the far right of a title that
+-- should instead sit right next to it.
+local HEADER_H_PADDING = S(24)
+local SPREAD_V_PADDING = S(22)
+local SPREAD_TITLE_FACE_SIZE = 34
+local SPREAD_BTN_SIZE = S(42)
+local SPREAD_BTN_GAP = S(10)
+
+local LEADING_V_PADDING = S(20)
+local LEADING_TITLE_FACE_SIZE = 29
+local LEADING_BTN_SIZE = S(38)
+local LEADING_GAP = S(14)
+
+local SUBHEADER_V_PADDING = S(8)
+local SUBHEADER_FACE_SIZE = 17
+
+-- ---- Row -----------------------------------------------------------
+local ROW_V_PADDING = S(14)
+local ROW_H_PADDING = S(24)
+local ROW_GAP = S(14)
+
+local COVER_W = S(64)
+local COVER_H = S(92)
+local COVER_LETTER_FACE_SIZE = 25
+
+local TITLE_FACE_SIZE = 20
+local AUTHOR_FACE_SIZE = 15
+local TITLE_TAG_GAP = S(8)
+local STACK_GAP = S(5)
+-- Tighter than STACK_GAP -- title-to-author sits closer together than the
+-- other stacked blocks (a wrapped title dropping its tag below, or the
+-- title block to the progress section).
+local TITLE_AUTHOR_GAP = S(1)
+local TAG_FACE_SIZE = 11
+local TAG_RADIUS = S(16)
+
+-- Bar is drawn noticeably thicker than the design's own 5px hairline-thin
+-- track, and only spans half its column's width rather than the full
+-- text column (the design itself caps this at 300px against a ~460px
+-- text column -- roughly half -- rather than filling it).
+local PROGRESS_TOP_GAP = S(9) -- design's flex "gap:5" plus the progress block's own "margin-top:4"
+local PROGRESS_HEIGHT = S(9)
+local PROGRESS_WIDTH_FRACTION = 0.5
+local PROGRESS_META_GAP = S(4)
+local META_FACE_SIZE = 13
+
+local CHEVRON_SIZE = S(20)
+local CHEVRON_LEFT_PAD = S(12)
+local CHEVRON_COL_WIDTH = CHEVRON_SIZE + CHEVRON_LEFT_PAD
+
+-- A rounded-corner pill outline, e.g. "The Broken Earth, #1" -- border
+-- only, no fill (the design's own tag has no background set), radius
+-- large enough to read as a true pill rather than a slightly-rounded
+-- rectangle.
 local function buildSeriesTag(text)
   local label = TextWidget:new{
     text = text,
-    face = Font:getFace("cfont", 16),
-    fgcolor = Blitbuffer.COLOR_BLACK,
+    face = Font:getFace("cfont", TAG_FACE_SIZE),
+    fgcolor = INK,
   }
   return FrameContainer:new{
-    bordersize = 0,
-    background = Blitbuffer.COLOR_GRAY_E,
-    radius = Size.radius.button,
-    padding_top = Size.padding.small,
-    padding_bottom = Size.padding.small,
-    padding_left = Size.padding.default,
-    padding_right = Size.padding.default,
+    bordersize = Size.border.default,
+    color = INK,
+    background = Blitbuffer.COLOR_WHITE,
+    radius = TAG_RADIUS,
+    padding_top = S(3),
+    padding_bottom = S(3),
+    padding_left = S(10),
+    padding_right = S(10),
     margin = 0,
     label,
   }
+end
+
+local function buildCoverPlaceholder(title)
+  local initial = (title and title:sub(1, 1) or "?"):upper()
+  local letter = TextWidget:new{
+    text = initial,
+    face = Font:getFace(SERIF_BOLD, COVER_LETTER_FACE_SIZE),
+    fgcolor = INK,
+  }
+  -- The design's cover placeholder is a diagonal-hatch fill with a
+  -- near-opaque white panel (the initial) drawn on top of the whole box,
+  -- which in practice reads as a plain white box with a centered letter --
+  -- there's no existing precedent in this codebase for painting a
+  -- repeating diagonal pattern, so this reproduces the visible result
+  -- (white box, bordered, centered initial) rather than inventing one.
+  --
+  -- The inner CenterContainer is sized to the box minus its border
+  -- (rather than the box's own full width/height) -- FrameContainer
+  -- paints its child inset by the border thickness without shrinking the
+  -- child's own reported size to match, so giving the CenterContainer the
+  -- full outer size shifts its centering box past the actual bordered
+  -- edge and the letter renders off-center.
+  return FrameContainer:new{
+    bordersize = BORDER,
+    color = INK,
+    background = Blitbuffer.COLOR_WHITE,
+    radius = 0,
+    padding = 0,
+    margin = 0,
+    width = COVER_W,
+    height = COVER_H,
+    CenterContainer:new{
+      dimen = Geom:new{ w = COVER_W - 2 * BORDER, h = COVER_H - 2 * BORDER },
+      letter,
+    },
+  }
+end
+
+local MONTH_NAMES = {
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+}
+
+-- ISO date/timestamp string -> "Mon D" (e.g. "Aug 12"), matching the
+-- design handoff's own sample data, rather than a full date parser --
+-- same just-take-what-you-need approach as shelf_ui.lua's own
+-- release_date year extraction (editionListItem).
+local function formatStartedDate(iso)
+  if not iso then
+    return nil
+  end
+  local year, month, day = iso:match("^(%d%d%d%d)-(%d%d)-(%d%d)")
+  if not year then
+    return nil
+  end
+  local name = MONTH_NAMES[tonumber(month)]
+  if not name then
+    return nil
+  end
+  return name .. " " .. tostring(tonumber(day))
+end
+
+-- Progress bar + "{pages}p - started {date} - {pct}%" meta line, fed by
+-- Hardcover's own progress_pages/started_at (hardcover_api.lua's
+-- listByStatus). Only shown when both a page count and a reading-progress
+-- record exist -- most books, including every manga volume read through
+-- Rakuyomi, have neither, so this is silently absent for them rather than
+-- showing an empty or zeroed-out bar.
+local function buildProgressSection(item, width)
+  local progress = item.reading_progress
+  if not progress or not progress.progress_pages or not item.pages or item.pages <= 0 then
+    return nil
+  end
+
+  local pct = progress.progress_pages / item.pages
+  if pct < 0 then pct = 0 end
+  if pct > 1 then pct = 1 end
+
+  local bar_width = math.floor(width * PROGRESS_WIDTH_FRACTION)
+  local bar = ProgressWidget:new{
+    width = bar_width,
+    height = PROGRESS_HEIGHT,
+    percentage = pct,
+    margin_h = 0,
+    margin_v = 0,
+    radius = 0,
+    bordercolor = INK,
+    bgcolor = Blitbuffer.COLOR_GRAY_E,
+    fillcolor = INK,
+  }
+
+  local pct_text = tostring(math.floor(pct * 100 + 0.5)) .. "%"
+  local started = formatStartedDate(progress.started_at)
+  local meta_text
+  if started then
+    meta_text = string.format(_("%dp - started %s - %s"), item.pages, started, pct_text)
+  else
+    meta_text = string.format(_("%dp - %s"), item.pages, pct_text)
+  end
+
+  return VerticalGroup:new{
+    align = "left",
+    bar,
+    VerticalSpan:new{ width = PROGRESS_META_GAP },
+    TextWidget:new{
+      text = meta_text,
+      face = Font:getFace("cfont", META_FACE_SIZE),
+      fgcolor = META_COLOR,
+      max_width = width,
+    },
+  }
+end
+
+-- Title + optional series tag, inline (matching the design's own
+-- inline-flex row) whenever the title's real, untruncated width actually
+-- leaves room for the tag; otherwise the title wraps across as many lines
+-- as it needs (no ellipsis) and the tag drops to its own line below.
+--
+-- The two-path split exists because of a real widget limitation:
+-- TextBoxWidget (the only widget here that wraps) always reserves its
+-- full given width regardless of the actual text length (confirmed
+-- earlier in this file's own history -- this was the exact bug that used
+-- to push the tag to a fixed offset instead of right after the title), so
+-- it can't sit next to a tag and have the tag trail the real text. A
+-- single-line TextWidget can (its :getSize() reflects what's actually
+-- drawn), so that's used whenever the title fits, which every title in
+-- the design's own sample data does.
+local function buildTitleAndTag(item, width)
+  local tag, tag_width = nil, 0
+  if item.series_tag then
+    tag = buildSeriesTag(item.series_tag)
+    tag_width = tag:getSize().w + TITLE_TAG_GAP
+  end
+
+  local natural_title = TextWidget:new{
+    text = item.title,
+    face = Font:getFace(SERIF_BOLD, TITLE_FACE_SIZE),
+  }
+  local natural_w = natural_title:getSize().w
+
+  if natural_w <= width - tag_width then
+    if tag then
+      return HorizontalGroup:new{
+        align = "center",
+        natural_title,
+        HorizontalSpan:new{ width = TITLE_TAG_GAP },
+        tag,
+      }
+    end
+    return natural_title
+  end
+
+  local wrapped = VerticalGroup:new{
+    align = "left",
+    TextBoxWidget:new{
+      text = item.title,
+      face = Font:getFace(SERIF_BOLD, TITLE_FACE_SIZE),
+      width = width,
+    },
+  }
+  if tag then
+    table.insert(wrapped, VerticalSpan:new{ width = STACK_GAP })
+    table.insert(wrapped, tag)
+  end
+  return wrapped
+end
+
+local function buildRowText(item, width)
+  local lines = VerticalGroup:new{ align = "left", buildTitleAndTag(item, width) }
+
+  if item.author then
+    table.insert(lines, VerticalSpan:new{ width = TITLE_AUTHOR_GAP })
+    table.insert(lines, TextBoxWidget:new{
+      text = item.author,
+      face = Font:getFace(SERIF_ITALIC, AUTHOR_FACE_SIZE),
+      fgcolor = AUTHOR_COLOR,
+      width = width,
+    })
+  end
+
+  local progress = buildProgressSection(item, width)
+  if progress then
+    table.insert(lines, VerticalSpan:new{ width = PROGRESS_TOP_GAP })
+    table.insert(lines, progress)
+  end
+
+  return lines
 end
 
 local BookRow = InputContainer:extend{
@@ -70,32 +348,65 @@ function BookRow:init()
   local content_width = self.width - 2 * ROW_H_PADDING
   local content
 
-  if self.item.series_tag then
-    -- Single-line text (TextWidget, not TextBoxWidget) truncated with an
-    -- ellipsis at max_width, so the tag sits immediately after wherever
-    -- the text actually ends -- TextBoxWidget always reserves its full
-    -- given width regardless of the text's real length, which is what
-    -- was pushing the tag out to a fixed offset near the row's right edge
-    -- instead of right after the author.
-    local tag = buildSeriesTag(self.item.series_tag)
-    local tag_width = tag:getSize().w
-    local text_max_width = content_width - tag_width - TAG_GAP
+  if self.item.title then
+    -- A book row: cover placeholder, title/author/series-tag/progress
+    -- column, chevron pinned to the row's right edge. Top-aligned rather
+    -- than vertically centered -- centering the whole row on its tallest
+    -- element (the cover) meant the title's position shifted up or down
+    -- depending on whether a given row had a progress bar under it; top
+    -- alignment keeps the title at the same fixed offset in every row.
+    -- The chevron's column is still a fixed-width RightContainer (its own
+    -- internal centering, independent of this row's top alignment) so it
+    -- lands at the true right edge of the row regardless of text length.
+    local text_col_width = content_width - COVER_W - ROW_GAP - CHEVRON_COL_WIDTH - ROW_GAP
+    local lines = buildRowText(self.item, text_col_width)
+    local lines_h = math.max(lines:getSize().h, COVER_H)
+
     content = HorizontalGroup:new{
-      align = "center",
-      TextWidget:new{
-        text = self.item.text,
-        face = Font:getFace("cfont", 20),
-        max_width = text_max_width,
+      align = "top",
+      buildCoverPlaceholder(self.item.title),
+      HorizontalSpan:new{ width = ROW_GAP },
+      lines,
+      HorizontalSpan:new{ width = ROW_GAP },
+      RightContainer:new{
+        dimen = Geom:new{ w = CHEVRON_COL_WIDTH, h = lines_h },
+        IconWidget:new{
+          icon = "chevron.right",
+          width = CHEVRON_SIZE,
+          height = CHEVRON_SIZE,
+        },
       },
-      HorizontalSpan:new{ width = TAG_GAP },
-      tag,
     }
   else
-    content = TextBoxWidget:new{
+    local text_width = content_width
+    local icon
+    if self.item.icon then
+      icon = IconWidget:new{
+        icon = self.item.icon,
+        width = S(20),
+        height = S(20),
+      }
+      text_width = content_width - S(20) - Size.padding.default
+    end
+
+    local label = TextBoxWidget:new{
       text = self.item.text,
-      face = Font:getFace("cfont", 20),
-      width = content_width,
+      face = Font:getFace("cfont", 22),
+      bold = self.item.accent or nil,
+      fgcolor = self.item.dim and META_COLOR or nil,
+      width = text_width,
     }
+
+    if icon then
+      content = HorizontalGroup:new{
+        align = "center",
+        icon,
+        HorizontalSpan:new{ width = Size.padding.default },
+        label,
+      }
+    else
+      content = label
+    end
   end
 
   self.frame = FrameContainer:new{
@@ -125,6 +436,170 @@ function BookRow:onTap()
   return true
 end
 
+-- A bordered square button wrapping a stock IconButton for the tap/hold/
+-- flash handling it already has -- IconButton itself draws no border, so
+-- this is just IconButton centered inside a bordered FrameContainer.
+local function buildIconButton(icon_name, callback, btn_size)
+  local icon_size = S(20)
+  local pad = math.floor((btn_size - icon_size) / 2)
+  local icon_btn = IconButton:new{
+    icon = icon_name,
+    width = icon_size,
+    height = icon_size,
+    padding = pad,
+    callback = callback,
+  }
+  local frame = FrameContainer:new{
+    bordersize = BORDER,
+    color = INK,
+    background = Blitbuffer.COLOR_WHITE,
+    radius = 0,
+    padding = 0,
+    margin = 0,
+    CenterContainer:new{
+      dimen = Geom:new{ w = btn_size, h = btn_size },
+      icon_btn,
+    },
+  }
+  return frame, icon_btn
+end
+
+-- "Spread" header: left-aligned bold serif title, one or more bordered
+-- square buttons pinned to the right edge (the shelf's search/refresh/
+-- close trio). `buttons` is a list of { icon, callback }.
+local function buildSpreadHeader(title, width, buttons)
+  local inner_w = width - 2 * HEADER_H_PADDING
+  local icon_btns = {}
+  local btn_frames = {}
+  local buttons_width = 0
+  for i, btn in ipairs(buttons) do
+    if i > 1 then
+      buttons_width = buttons_width + SPREAD_BTN_GAP
+    end
+    local frame, icon_btn = buildIconButton(btn.icon, btn.callback, SPREAD_BTN_SIZE)
+    table.insert(btn_frames, frame)
+    table.insert(icon_btns, icon_btn)
+    buttons_width = buttons_width + SPREAD_BTN_SIZE
+  end
+
+  local title_max_width = inner_w - buttons_width - (buttons_width > 0 and SPREAD_BTN_GAP or 0)
+  local title_widget = TextWidget:new{
+    text = title,
+    face = Font:getFace(SERIF_BOLD, SPREAD_TITLE_FACE_SIZE),
+    max_width = title_max_width,
+  }
+  local row_h = math.max(title_widget:getSize().h, SPREAD_BTN_SIZE)
+
+  local left = LeftContainer:new{
+    dimen = Geom:new{ w = inner_w, h = row_h },
+    title_widget,
+  }
+
+  local overlap
+  if #btn_frames > 0 then
+    local buttons_row = HorizontalGroup:new{ align = "center" }
+    for i, frame in ipairs(btn_frames) do
+      if i > 1 then
+        table.insert(buttons_row, HorizontalSpan:new{ width = SPREAD_BTN_GAP })
+      end
+      table.insert(buttons_row, frame)
+    end
+    overlap = OverlapGroup:new{
+      dimen = Geom:new{ w = inner_w, h = row_h },
+      allow_mirroring = false,
+      left,
+      RightContainer:new{ dimen = Geom:new{ w = inner_w, h = row_h }, buttons_row },
+    }
+  else
+    overlap = OverlapGroup:new{
+      dimen = Geom:new{ w = inner_w, h = row_h },
+      allow_mirroring = false,
+      left,
+    }
+  end
+
+  local padded = FrameContainer:new{
+    bordersize = 0,
+    padding = 0,
+    padding_top = SPREAD_V_PADDING,
+    padding_bottom = SPREAD_V_PADDING,
+    padding_left = HEADER_H_PADDING,
+    padding_right = HEADER_H_PADDING,
+    margin = 0,
+    width = width,
+    overlap,
+  }
+
+  return VerticalGroup:new{
+    align = "left",
+    padded,
+    LineWidget:new{ dimen = Geom:new{ w = width, h = Size.line.thin }, background = HEADER_DIVIDER_COLOR },
+  }, icon_btns
+end
+
+-- "Leading" header: a single bordered back-chevron button, then the title
+-- immediately beside it, both left-aligned (search results, language
+-- picker) -- a different shape from the shelf's spread header, not the
+-- same one with fewer buttons: the title sits right next to the button
+-- here, it doesn't get pushed to the opposite edge.
+local function buildLeadingHeader(title, width, back_button)
+  local frame, icon_btn = buildIconButton(back_button.icon, back_button.callback, LEADING_BTN_SIZE)
+  local title_widget = TextWidget:new{
+    text = title,
+    face = Font:getFace(SERIF_BOLD, LEADING_TITLE_FACE_SIZE),
+    max_width = width - 2 * HEADER_H_PADDING - LEADING_BTN_SIZE - LEADING_GAP,
+  }
+
+  local row = HorizontalGroup:new{
+    align = "center",
+    frame,
+    HorizontalSpan:new{ width = LEADING_GAP },
+    title_widget,
+  }
+
+  local padded = FrameContainer:new{
+    bordersize = 0,
+    padding = 0,
+    padding_top = LEADING_V_PADDING,
+    padding_bottom = LEADING_V_PADDING,
+    padding_left = HEADER_H_PADDING,
+    padding_right = HEADER_H_PADDING,
+    margin = 0,
+    width = width,
+    row,
+  }
+
+  return VerticalGroup:new{
+    align = "left",
+    padded,
+    LineWidget:new{ dimen = Geom:new{ w = width, h = Size.line.thin }, background = HEADER_DIVIDER_COLOR },
+  }, { icon_btn }
+end
+
+-- Subheader strip below the header, e.g. "Currently Reading - 6 books -
+-- Updated just now", with its own (lighter) hairline underneath.
+local function buildSubheader(text, width)
+  return VerticalGroup:new{
+    align = "left",
+    FrameContainer:new{
+      bordersize = 0,
+      padding_top = SUBHEADER_V_PADDING,
+      padding_bottom = SUBHEADER_V_PADDING,
+      padding_left = HEADER_H_PADDING,
+      padding_right = HEADER_H_PADDING,
+      margin = 0,
+      width = width,
+      TextWidget:new{
+        text = text,
+        face = Font:getFace("cfont", SUBHEADER_FACE_SIZE),
+        fgcolor = META_COLOR,
+        max_width = width - 2 * HEADER_H_PADDING,
+      },
+    },
+    LineWidget:new{ dimen = Geom:new{ w = width, h = Size.line.thin }, background = SUBHEADER_DIVIDER_COLOR },
+  }
+end
+
 local BookList = {}
 
 -- Builds and returns the widget to pass to UIManager:show()/close(). Not
@@ -133,44 +608,77 @@ local BookList = {}
 -- picker/status picker layering on top without closing the shelf) doesn't
 -- need to change at all, only how the list itself is built.
 --
--- item_table entries carry a "text" field ("Title - Author"), an optional
--- "series_tag" field ("Series Name, #1"), and whatever identifying fields
--- the caller needs (book_id, row_id, edition_id...), passed straight
--- through to on_select untouched.
-function BookList.build(title, item_table, in_book, on_select, on_close)
+-- item_table entries are either a book row ("title" field, required;
+-- "author", "series_tag", "pages" and "reading_progress" optional) or a
+-- plain row ("text" field instead, no title/author split -- used for
+-- editions/languages). Either kind may set "accent" (bold text), "dim"
+-- (gray text -- for informational rows like an empty-shelf message), or
+-- "icon" (a stock icon name from resources/icons/mdlight, shown leading
+-- the text). Any other fields the caller needs (book_id, row_id,
+-- edition_id...) pass straight through to on_select untouched.
+--
+-- `opts` (optional):
+--   header_buttons = { { icon, callback }, ... } -- shelf-style spread
+--     header (title left, buttons right).
+--   back_button = { icon, callback } -- search/language-picker-style
+--     leading header (back button, then title).
+--   subheader = "text" -- shown below the header with its own hairline.
+-- Without header_buttons or back_button, falls back to a plain spread
+-- header with no buttons at all (still used by the edition/status/
+-- language overlays this phase hasn't touched yet).
+function BookList.build(title, item_table, in_book, on_select, on_close, opts)
+  opts = opts or {}
   local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
   local width, height
   if in_book then
-    width = math.min(screen_w - Screen:scaleBySize(50), Screen:scaleBySize(600))
-    height = screen_h - Screen:scaleBySize(50)
+    width = math.min(screen_w - S(50), S(600))
+    height = screen_h - S(50)
   else
     width = screen_w
     height = screen_h
   end
 
-  local title_bar = TitleBar:new{
-    width = width,
-    title = title,
-    close_callback = on_close,
-  }
+  local header_widget, header_icon_btns
+  if opts.back_button then
+    header_widget, header_icon_btns = buildLeadingHeader(title, width, opts.back_button)
+  else
+    header_widget, header_icon_btns = buildSpreadHeader(title, width, opts.header_buttons or {})
+  end
+
+  local header_stack = VerticalGroup:new{ align = "left", header_widget }
+  if opts.subheader then
+    table.insert(header_stack, buildSubheader(opts.subheader, width))
+  end
+
+  -- Rows must be narrower than the full list width by the vertical
+  -- scrollbar's own reserved space, or the content is technically wider
+  -- than the scrollable viewport once that scrollbar appears (any list
+  -- with enough rows to need vertical scrolling), which registers as a
+  -- few pixels of horizontal overflow and triggers an unwanted, useless
+  -- horizontal scrollbar. Reserved unconditionally rather than only when
+  -- scrolling turns out to be needed, since row widths are fixed before
+  -- the total content height (and therefore whether scrolling is needed
+  -- at all) is known.
+  local scrollbar_reserve = ScrollableContainer:getScrollbarWidth()
+  local row_width = width - scrollbar_reserve
 
   local rows = VerticalGroup:new{ align = "left" }
   local book_rows = {}
   for _, item in ipairs(item_table) do
     local row = BookRow:new{
       item = item,
-      width = width,
+      width = row_width,
       callback = function() on_select(item) end,
     }
     table.insert(book_rows, row)
     table.insert(rows, row)
     table.insert(rows, LineWidget:new{
-      dimen = Geom:new{ w = width, h = Size.line.thin },
-      background = Blitbuffer.COLOR_GRAY_D,
+      dimen = Geom:new{ w = row_width, h = Size.line.thin },
+      background = ROW_DIVIDER_COLOR,
     })
   end
 
-  local content_height = height - title_bar:getSize().h
+  local content_height = height - header_stack:getSize().h
   local scroll_container = ScrollableContainer:new{
     dimen = Geom:new{ w = width, h = content_height },
     rows,
@@ -186,7 +694,7 @@ function BookList.build(title, item_table, in_book, on_select, on_close)
     height = height,
     VerticalGroup:new{
       align = "left",
-      title_bar,
+      header_stack,
       scroll_container,
     },
   }
@@ -203,10 +711,13 @@ function BookList.build(title, item_table, in_book, on_select, on_close)
   -- `cropping_widget` on the widget actually passed to UIManager:show(),
   -- or inner-element flashing leaks outside the scrollable area on tap.
   top_widget.cropping_widget = scroll_container
-  title_bar.show_parent = top_widget
+  header_stack.show_parent = top_widget
   scroll_container.show_parent = top_widget
   for _, row in ipairs(book_rows) do
     row.show_parent = top_widget
+  end
+  for _, icon_btn in ipairs(header_icon_btns) do
+    icon_btn.show_parent = top_widget
   end
 
   return top_widget

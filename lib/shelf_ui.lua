@@ -34,9 +34,7 @@ local reading_format_labels = {
 
 local EBOOK_FORMAT_ID = 4
 
-local SEARCH_ROW_ID = "__search__"
-local BACK_ROW_ID = "__back__"
-local REFRESH_ROW_ID = "__refresh__"
+local EMPTY_ROW_ID = "__empty__"
 
 -- reading_format_id == nil (edition has no format set) is kept, same
 -- reasoning as filterByLanguage below: unset isn't the same as "wrong".
@@ -91,19 +89,18 @@ local function seriesLabel(book)
   return entry.series.name .. ", #" .. tostring(entry.position)
 end
 
--- "Title - Author" as the main line; series (when present) renders as its
--- own rounded-corner tag underneath, via BookList/book_list.lua's
--- series_tag field, rather than being folded into the text line.
+-- title/author passed through as separate fields (not one combined
+-- string) so book_list.lua can style them differently -- bold title,
+-- gray author -- and size each independently against the actual space
+-- left after the series tag, if any.
 local function bookListItem(book)
-  local text = book.title
-  local author = mainAuthor(book)
-  if author then
-    text = text .. " - " .. author
-  end
   return {
-    text = text,
+    title = book.title,
+    author = mainAuthor(book),
     series_tag = seriesLabel(book),
     book_id = book.book_id,
+    pages = book.pages,
+    reading_progress = book.reading_progress,
   }
 end
 
@@ -150,11 +147,28 @@ end
 -- leaving the shelf's own rows visibly ghosted through on top. Forcing a
 -- full screen redraw sidesteps needing that computed region to be exactly
 -- right.
-function ShelfUI:_openOverlayList(title, item_table, in_book, on_select)
+-- Header button entries (opts.header_buttons and opts.back_button)
+-- without their own "callback" get this screen's own close (back to
+-- whatever's underneath) wired in automatically -- so callers can write
+-- e.g. { icon = "close" } or { icon = "chevron.left" } for a plain
+-- dismiss button without needing the widget reference (which doesn't
+-- exist yet at the point the caller builds opts) to build that closure
+-- themselves.
+function ShelfUI:_openOverlayList(title, item_table, in_book, on_select, opts)
   local widget
-  widget = BookList.build(title, item_table, in_book, on_select, function()
+  local on_close = function()
     UIManager:close(widget, "full")
-  end)
+  end
+  opts = opts or {}
+  if opts.header_buttons then
+    for _, btn in ipairs(opts.header_buttons) do
+      btn.callback = btn.callback or on_close
+    end
+  end
+  if opts.back_button then
+    opts.back_button.callback = opts.back_button.callback or on_close
+  end
+  widget = BookList.build(title, item_table, in_book, on_select, on_close, opts)
   UIManager:show(widget, "full")
   return { widget = widget }
 end
@@ -171,10 +185,14 @@ function ShelfUI:_refreshShelf()
 end
 
 function ShelfUI:_shelfItemTable(books)
-  local item_table = {
-    { text = _("+ Search & add a book"), row_id = SEARCH_ROW_ID },
-    { text = _("Refresh"), row_id = REFRESH_ROW_ID },
-  }
+  local item_table = {}
+  if #books == 0 then
+    table.insert(item_table, {
+      text = _("Nothing here yet -- tap the search icon above to add a book."),
+      row_id = EMPTY_ROW_ID,
+      dim = true,
+    })
+  end
   for _, book in ipairs(books) do
     table.insert(item_table, bookListItem(book))
   end
@@ -358,7 +376,10 @@ end
 -- there's no ebook at all (their database is younger than Goodreads', so
 -- this happens), fall back to every edition and say so explicitly, so a
 -- print/audio result reads as "nothing else was available" rather than a
--- bug.
+-- bug. Always shows the edition picker screen, even for a single clean
+-- match -- the language button on it is a deliberate per-book override for
+-- the rare book actually being read in another language, not just a
+-- resolver for ambiguous results, so it has to stay reachable every time.
 function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, language_filter)
   if language_filter == nil then
     language_filter = DEFAULT_LANGUAGE
@@ -372,13 +393,11 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
   local all_editions = Api:findEditions(book_id) or {}
   local ebook_editions = filterByFormat(all_editions, EBOOK_FORMAT_ID)
   local editions = filterByLanguage(ebook_editions, language_filter)
-  local widened = false
 
   if #editions == 0 and #ebook_editions > 0 then
     -- Ebook editions exist, just not in the requested language.
     editions = ebook_editions
     language_filter = "all"
-    widened = true
   end
 
   local no_ebook = false
@@ -386,7 +405,6 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
     -- No ebook edition at all for this book -- show whatever exists
     -- instead of a dead end, and say clearly why.
     no_ebook = true
-    widened = true
     editions = filterByLanguage(all_editions, language_filter)
     if #editions == 0 then
       editions = all_editions
@@ -401,20 +419,17 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
     })
   end
 
-  -- Auto-link without showing the picker only on the clean path: exactly
-  -- one ebook edition in the requested language, no fallback needed. Any
-  -- time we had to widen the search, always show the picker -- silently
-  -- linking a paperback or a foreign-language edition is exactly the
-  -- surprise this whole feature exists to prevent.
-  if #editions <= 1 and not widened then
-    local edition_id = editions[1] and editions[1].id or nil
-    self:showStatusPicker(book_id, title, edition_id, on_done)
-    return
-  end
-
+  -- Always show this screen, even when there's only one edition to pick --
+  -- the language button is a deliberate per-book override (almost never
+  -- needed, since English/ebook is the right default nearly every time),
+  -- not just a resolver for ambiguous results. A book that's actually
+  -- being read in Portuguese still needs that override reachable, and it
+  -- wouldn't be if a clean single English match skipped this screen
+  -- entirely.
   local language_row = {
     text = "[" .. languageLabel(language_filter) .. "] " .. _("change language..."),
     row_id = LANGUAGE_ROW_ID,
+    accent = true,
   }
   local item_table = { language_row }
   for _, edition in ipairs(editions) do
@@ -482,22 +497,18 @@ function ShelfUI:runSearch(query, in_book)
     return
   end
 
-  local item_table = { { text = _("<- Back to shelf"), row_id = BACK_ROW_ID } }
+  local item_table = {}
   for _, book in ipairs(books) do
     table.insert(item_table, bookListItem(book))
   end
 
   local opened
-  opened = self:_openOverlayList(_("Search results"), item_table, in_book, function(item)
-    if item.row_id == BACK_ROW_ID then
-      UIManager:close(opened.widget, "full")
-      return
-    end
+  opened = self:_openOverlayList(_("Search Hardcover"), item_table, in_book, function(item)
     UIManager:close(opened.widget, "full")
-    self:pickEditionThenStatus(item.book_id, item.text, in_book, function()
+    self:pickEditionThenStatus(item.book_id, item.title, in_book, function()
       self:_refreshShelf()
     end)
-  end)
+  end, { back_button = { icon = "chevron.left" } })
 end
 
 -- Single entry point: one page showing your Currently Reading shelf, with
@@ -522,19 +533,26 @@ function ShelfUI:show(in_book)
 
   local books = Api:listByStatus(CONST.STATUS.READING, user_id) or {}
 
-  local opened = self:_openOverlayList(_("Currently Reading"), self:_shelfItemTable(books), in_book, function(item)
-    if item.row_id == SEARCH_ROW_ID then
-      self:showSearchDialog(in_book)
-      return
-    end
-    if item.row_id == REFRESH_ROW_ID then
+  local subheader = string.format(_("Currently Reading - %d books"), #books)
+
+  local opts = {
+    header_buttons = {
+      { icon = "appbar.search", callback = function() self:showSearchDialog(in_book) end },
+      { icon = "cre.render.reload", callback = function() self:_refreshShelf() end },
+      { icon = "close" },
+    },
+    subheader = subheader,
+  }
+
+  local opened = self:_openOverlayList(_("Hardcover Shelf"), self:_shelfItemTable(books), in_book, function(item)
+    if item.row_id == EMPTY_ROW_ID then
       self:_refreshShelf()
       return
     end
-    self:showStatusPicker(item.book_id, item.text, nil, function()
+    self:showStatusPicker(item.book_id, item.title, nil, function()
       self:_refreshShelf()
     end)
-  end)
+  end, opts)
   self._shelf_widget = opened.widget
 end
 
