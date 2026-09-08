@@ -92,6 +92,18 @@ local LEADING_GAP = S(14)
 local SUBHEADER_V_PADDING = S(8)
 local SUBHEADER_FACE_SIZE = 17
 
+-- ---- Search bar (fake field + language chip, both just open a popup on
+-- tap -- see shelf_ui.lua's _editSearchQuery/chooseSearchLanguage) ------
+local SEARCH_BAR_HEIGHT = S(44)
+local SEARCH_BAR_V_PADDING = S(16)
+local SEARCH_BAR_GAP = S(8)
+local SEARCH_FIELD_FACE_SIZE = 16
+local SEARCH_FIELD_H_PADDING = S(14)
+local CHIP_H_PADDING = S(14)
+local CHIP_GAP = S(6)
+local CHIP_FACE_SIZE = 13
+local CHIP_ARROW_SIZE = S(10)
+
 -- ---- Row -----------------------------------------------------------
 local ROW_V_PADDING = S(14)
 local ROW_H_PADDING = S(24)
@@ -337,6 +349,35 @@ local function buildRowText(item, width)
   return lines
 end
 
+-- A plain already-built widget made tappable -- same minimal
+-- tap-gesture pattern as BookRow below, just wrapping arbitrary content
+-- instead of a book row specifically. Used for the search bar's fake
+-- field and language chip, which are static visuals that open a popup on
+-- tap rather than anything that renders its own pressed state.
+local TapArea = InputContainer:extend{
+  widget = nil,
+  callback = nil,
+  show_parent = nil,
+}
+
+function TapArea:init()
+  self[1] = self.widget
+  local size = self.widget:getSize()
+  self.dimen = Geom:new{ w = size.w, h = size.h }
+  if Device:isTouchDevice() then
+    self.ges_events = {
+      Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
+    }
+  end
+end
+
+function TapArea:onTap()
+  if self.callback then
+    self.callback()
+  end
+  return true
+end
+
 local BookRow = InputContainer:extend{
   item = nil,
   width = nil,
@@ -355,9 +396,19 @@ function BookRow:init()
     -- element (the cover) meant the title's position shifted up or down
     -- depending on whether a given row had a progress bar under it; top
     -- alignment keeps the title at the same fixed offset in every row.
-    -- The chevron's column is still a fixed-width RightContainer (its own
-    -- internal centering, independent of this row's top alignment) so it
-    -- lands at the true right edge of the row regardless of text length.
+    --
+    -- The text column is wrapped in a LeftContainer sized to its own
+    -- natural height (not lines_h, which can be taller when the cover
+    -- dominates) specifically so that wrapping adds zero vertical offset
+    -- -- LeftContainer centers its child vertically within whatever
+    -- height it's given, so giving it the content's *own* height keeps
+    -- the top-alignment above intact, while still fixing its *width* to
+    -- text_col_width. That width fix matters for any row short enough to
+    -- have no author/tag/progress under the title (a plain title with no
+    -- other book data) -- without it, the chevron's RightContainer gets
+    -- positioned right after the title's own short natural width instead
+    -- of at the row's true right edge, since HorizontalGroup places each
+    -- child using its neighbor's actual measured size.
     local text_col_width = content_width - COVER_W - ROW_GAP - CHEVRON_COL_WIDTH - ROW_GAP
     local lines = buildRowText(self.item, text_col_width)
     local lines_h = math.max(lines:getSize().h, COVER_H)
@@ -366,7 +417,10 @@ function BookRow:init()
       align = "top",
       buildCoverPlaceholder(self.item.title),
       HorizontalSpan:new{ width = ROW_GAP },
-      lines,
+      LeftContainer:new{
+        dimen = Geom:new{ w = text_col_width, h = lines:getSize().h },
+        lines,
+      },
       HorizontalSpan:new{ width = ROW_GAP },
       RightContainer:new{
         dimen = Geom:new{ w = CHEVRON_COL_WIDTH, h = lines_h },
@@ -600,6 +654,140 @@ local function buildSubheader(text, width)
   }
 end
 
+-- The search bar's fake text field -- looks like a real input (bordered
+-- box, query text or a grayed-out hint) but only ever opens a popup on
+-- tap (see shelf_ui.lua's _editSearchQuery); it's not an editable widget.
+--
+-- The label is wrapped in a LeftContainer with an explicit dimen instead
+-- of forcing width/height directly on the FrameContainer -- the same fix
+-- as buildCoverPlaceholder's CenterContainer above, for the same
+-- underlying reason: FrameContainer:getSize() computes its own reported
+-- size from its child's size plus padding/border, ignoring any forced
+-- width/height field entirely, while paintTo *does* honor a forced
+-- width/height for what it actually draws. Force one directly (as this
+-- function's first version did) and the two go out of sync: whatever
+-- else measures this widget via getSize() -- here, the HorizontalGroup
+-- placing the language chip right after it -- sees a box only as wide as
+-- the label's own short text, while the visible bordered box paints at
+-- the full intended width. The label ends up sharing space with a chip
+-- positioned as if the field were much narrower than it's drawn, and the
+-- field's real right portion renders as a separate-looking empty box.
+-- Giving the inner content its own explicit dimen sidesteps the forced
+-- override path entirely: FrameContainer's normal content+padding+border
+-- formula then reconstructs the exact intended size on its own.
+local function buildSearchField(text, hint, width)
+  local has_value = text and text:match("%S")
+  local inner_w = width - 2 * BORDER - 2 * SEARCH_FIELD_H_PADDING
+  local inner_h = SEARCH_BAR_HEIGHT - 2 * BORDER
+  local label = TextWidget:new{
+    text = has_value and text or hint,
+    face = Font:getFace("cfont", SEARCH_FIELD_FACE_SIZE),
+    fgcolor = has_value and INK or META_COLOR,
+    max_width = inner_w,
+  }
+  return FrameContainer:new{
+    bordersize = BORDER,
+    color = INK,
+    background = Blitbuffer.COLOR_WHITE,
+    radius = 0,
+    padding_top = 0,
+    padding_bottom = 0,
+    padding_left = SEARCH_FIELD_H_PADDING,
+    padding_right = SEARCH_FIELD_H_PADDING,
+    margin = 0,
+    LeftContainer:new{
+      dimen = Geom:new{ w = inner_w, h = inner_h },
+      label,
+    },
+  }
+end
+
+-- The language chip ("EN ▾") -- a down-chevron synthesized by rotating
+-- the up-chevron icon 180 degrees, since resources/icons/mdlight has no
+-- dedicated down-chevron file (confirmed: only first/last/left/right/up).
+-- Same fixed-dimen-wrapper approach as buildSearchField, for the same
+-- reason -- here sized to the content's own natural width (no separate
+-- outer width to reconcile against, since the chip isn't stretched to
+-- fill any particular column).
+local function buildLanguageChip(label_text)
+  local label = TextWidget:new{
+    text = label_text,
+    face = Font:getFace("cfont", CHIP_FACE_SIZE),
+    fgcolor = INK,
+  }
+  local content = HorizontalGroup:new{
+    align = "center",
+    label,
+    HorizontalSpan:new{ width = CHIP_GAP },
+    IconWidget:new{
+      icon = "chevron.up",
+      rotation_angle = 180,
+      width = CHIP_ARROW_SIZE,
+      height = CHIP_ARROW_SIZE,
+    },
+  }
+  local content_size = content:getSize()
+  local inner_h = SEARCH_BAR_HEIGHT - 2 * BORDER
+  return FrameContainer:new{
+    bordersize = BORDER,
+    color = INK,
+    background = Blitbuffer.COLOR_WHITE,
+    radius = 0,
+    padding_top = 0,
+    padding_bottom = 0,
+    padding_left = CHIP_H_PADDING,
+    padding_right = CHIP_H_PADDING,
+    margin = 0,
+    CenterContainer:new{
+      dimen = Geom:new{ w = content_size.w, h = inner_h },
+      content,
+    },
+  }
+end
+
+-- Search-bar row (field + language chip) plus its own hairline below,
+-- same shape as buildSubheader. cfg: { query_text, query_hint,
+-- on_query_tap, language_label, on_language_tap }. Returns the block
+-- widget plus the two TapAreas, so the caller can give them a real
+-- show_parent the same way every row and header button already gets one.
+local function buildSearchBarBlock(cfg, width)
+  local inner_w = width - 2 * HEADER_H_PADDING
+  local chip = buildLanguageChip(cfg.language_label)
+  local chip_w = chip:getSize().w
+  local field_w = inner_w - chip_w - SEARCH_BAR_GAP
+  local field = buildSearchField(cfg.query_text, cfg.query_hint, field_w)
+
+  local field_tap = TapArea:new{ widget = field, callback = cfg.on_query_tap }
+  local chip_tap = TapArea:new{ widget = chip, callback = cfg.on_language_tap }
+
+  local row = HorizontalGroup:new{
+    align = "top",
+    field_tap,
+    HorizontalSpan:new{ width = SEARCH_BAR_GAP },
+    chip_tap,
+  }
+
+  local padded = FrameContainer:new{
+    bordersize = 0,
+    padding = 0,
+    padding_top = SEARCH_BAR_V_PADDING,
+    padding_bottom = SEARCH_BAR_V_PADDING,
+    padding_left = HEADER_H_PADDING,
+    padding_right = HEADER_H_PADDING,
+    margin = 0,
+    width = width,
+    row,
+  }
+
+  local block = VerticalGroup:new{
+    align = "left",
+    padded,
+    LineWidget:new{ dimen = Geom:new{ w = width, h = Size.line.thin }, background = SUBHEADER_DIVIDER_COLOR },
+  }
+
+  return block, { field_tap, chip_tap }
+end
+
 local BookList = {}
 
 -- Builds and returns the widget to pass to UIManager:show()/close(). Not
@@ -622,7 +810,12 @@ local BookList = {}
 --     header (title left, buttons right).
 --   back_button = { icon, callback } -- search/language-picker-style
 --     leading header (back button, then title).
---   subheader = "text" -- shown below the header with its own hairline.
+--   subheader = "text" -- shown below the header (and the search bar, if
+--     any) with its own hairline.
+--   search_bar = { query_text, query_hint, on_query_tap, language_label,
+--     on_language_tap } -- a fake text field + language chip, both of
+--     which just open a popup on tap (see book_list.lua's own
+--     buildSearchBarBlock) rather than being live-editable.
 -- Without header_buttons or back_button, falls back to a plain spread
 -- header with no buttons at all (still used by the edition/status/
 -- language overlays this phase hasn't touched yet).
@@ -646,6 +839,13 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
   end
 
   local header_stack = VerticalGroup:new{ align = "left", header_widget }
+  if opts.search_bar then
+    local search_bar_block, search_bar_taps = buildSearchBarBlock(opts.search_bar, width)
+    table.insert(header_stack, search_bar_block)
+    for _, tap in ipairs(search_bar_taps) do
+      table.insert(header_icon_btns, tap)
+    end
+  end
   if opts.subheader then
     table.insert(header_stack, buildSubheader(opts.subheader, width))
   end

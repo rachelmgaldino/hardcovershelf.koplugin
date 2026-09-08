@@ -39,3 +39,26 @@
   default 2.5 rating: `SpinWidget` only enables Save once the value
   differs from its starting point unless told otherwise, and there's never
   a pre-existing rating being edited here.
+- Redesigned the shelf and search screens against a design handoff
+  (mockup + CSS): custom header (title + icon buttons, two layouts for
+  the shelf vs. search/back-button screens) replacing the pinned
+  search/refresh/back rows; a subheader showing the book count; rows
+  rebuilt with a cover placeholder, serif title/author, and a progress
+  bar/meta line fed by Hardcover's own `progress_pages`/`started_at` where
+  a book has a logged reading session.
+- Fixed a font-fallback path (`ui/font.lua`'s raw-filename fallback) to
+  pull in real serif faces (`NotoSerif-*.ttf`) for titles/authors, instead
+  of the sans-only named faces every other widget in this codebase uses.
+- Replaced the search popup-then-results-overlay flow with a single
+  search page: a fake text field + language chip (both open a small popup
+  on tap rather than being live-editable -- KOReader's `InputText` can be
+  embedded standalone, but only by keeping one instance alive across an
+  in-place refresh, which this plugin's close-and-rebuild screen model
+  doesn't support), a result count line, and the results list itself.
+  Language filtering is shared with the existing per-book edition-picker
+  override instead of being a separate implementation.
+- Fixed two `FrameContainer` layout bugs where a forced `width`/`height`
+  went out of sync with what `getSize()` reports (it computes from
+  content + padding + border, ignoring any forced size): the cover
+  placeholder's initial letter rendering off-center, and the search
+  field/language chip corrupting each other's position.

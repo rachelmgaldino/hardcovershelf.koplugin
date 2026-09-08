@@ -15,6 +15,12 @@ local ShelfUI = {
   -- the shelf list by closing and reopening the page.
   _shelf_widget = nil,
   _in_book = false,
+  -- Search page state, persisted across rebuilds (query text, current
+  -- language filter, and the currently-shown widget so a rebuild can
+  -- close it first instead of stacking a new copy on top).
+  _search_widget = nil,
+  _search_query = nil,
+  _search_language = nil,
 }
 
 local status_labels = {
@@ -153,11 +159,17 @@ end
 -- e.g. { icon = "close" } or { icon = "chevron.left" } for a plain
 -- dismiss button without needing the widget reference (which doesn't
 -- exist yet at the point the caller builds opts) to build that closure
--- themselves.
+-- themselves. opts.on_closed, if given, runs right after -- for a caller
+-- (the search page) that tracks "is my widget currently open" in its own
+-- state and needs to hear about a close triggered from inside this
+-- screen (its back button), not just ones it triggers itself.
 function ShelfUI:_openOverlayList(title, item_table, in_book, on_select, opts)
   local widget
   local on_close = function()
     UIManager:close(widget, "full")
+    if opts.on_closed then
+      opts.on_closed()
+    end
   end
   opts = opts or {}
   if opts.header_buttons then
@@ -301,28 +313,26 @@ local function languageLabel(code)
   return LANGUAGE_LABELS[code] or code:upper()
 end
 
--- code2 == nil (edition has no language set) is kept in every filter --
--- excluding it would hide editions Hardcover just never tagged, which
--- isn't the same as them being the wrong language.
-local function filterByLanguage(editions, code)
+-- Short code for the search-bar chip ("EN", "PT", "ALL"), as opposed to
+-- languageLabel's full name (used in the "Results for... / {Language}"
+-- line) -- same distinction the design handoff itself makes between its
+-- langCode and langName.
+local function languageCode(code)
   if not code or code == "all" then
-    return editions
+    return _("ALL")
   end
-  local filtered = {}
-  for _, edition in ipairs(editions) do
-    local edition_code = edition.language and edition.language.code2
-    if not edition_code or edition_code == code then
-      table.insert(filtered, edition)
-    end
-  end
-  return filtered
+  return code:upper()
 end
 
-function ShelfUI:showLanguageChooser(book_id, title, in_book, on_done, current)
+-- Shared option list (English/Portuguese/All/a typed code) behind both
+-- the per-book edition-picker override (showLanguageChooser, below) and
+-- the search page's language chip -- same underlying chooser, just
+-- wired to a different "what happens after you pick" callback.
+local function chooseLanguageOptions(current, on_pick)
   local dialog
   local function pick(code)
     UIManager:close(dialog)
-    self:pickEditionThenStatus(book_id, title, in_book, on_done, code)
+    on_pick(code)
   end
 
   dialog = ButtonDialog:new{
@@ -345,11 +355,7 @@ function ShelfUI:showLanguageChooser(book_id, title, in_book, on_done, current)
               callback = function()
                 local code = input:getInputText():lower():match("^%a%a$")
                 UIManager:close(input)
-                if code then
-                  pick(code)
-                else
-                  self:pickEditionThenStatus(book_id, title, in_book, on_done, current)
-                end
+                on_pick(code or current)
               end,
             },
           }},
@@ -360,6 +366,38 @@ function ShelfUI:showLanguageChooser(book_id, title, in_book, on_done, current)
     },
   }
   UIManager:show(dialog)
+end
+
+-- code2 == nil (edition has no language set) is kept in every filter --
+-- excluding it would hide editions Hardcover just never tagged, which
+-- isn't the same as them being the wrong language.
+local function filterByLanguage(editions, code)
+  if not code or code == "all" then
+    return editions
+  end
+  local filtered = {}
+  for _, edition in ipairs(editions) do
+    local edition_code = edition.language and edition.language.code2
+    if not edition_code or edition_code == code then
+      table.insert(filtered, edition)
+    end
+  end
+  return filtered
+end
+
+function ShelfUI:showLanguageChooser(book_id, title, in_book, on_done, current)
+  chooseLanguageOptions(current, function(code)
+    self:pickEditionThenStatus(book_id, title, in_book, on_done, code)
+  end)
+end
+
+-- Same chooser, wired to the search page's persistent language filter
+-- instead of a single book's edition pick.
+function ShelfUI:chooseSearchLanguage(in_book)
+  chooseLanguageOptions(self._search_language, function(code)
+    self._search_language = code
+    self:showSearchPage(in_book)
+  end)
 end
 
 -- Only for books being newly added from search -- an already-linked shelf
@@ -447,68 +485,119 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
   end)
 end
 
-function ShelfUI:showSearchDialog(in_book)
-  local search_dialog
-  search_dialog = InputDialog:new{
+-- Opens a plain InputDialog (the same popup search always used) prefilled
+-- with the current query, then rebuilds the search page with the new
+-- query on Search -- the on-page search bar only ever *looks* like a real
+-- text field; tapping it still hands off to this same popup rather than
+-- embedding a live-editable field directly in the page. KOReader's
+-- InputText widget genuinely can be embedded standalone outside
+-- InputDialog (bookshelf.koplugin's own library_modal.lua does exactly
+-- that), but only by keeping one persistent instance alive across an
+-- in-place refresh -- every other screen in this plugin, this one
+-- included, is built by fully closing and reopening a new widget on any
+-- change, which a live keystroke-by-keystroke field can't survive. A
+-- popup avoids needing a second, different page-lifecycle model just for
+-- this one field.
+function ShelfUI:_editSearchQuery(in_book)
+  local dialog
+  dialog = InputDialog:new{
     title = _("Search Hardcover"),
     input_hint = _("Title or author"),
     -- TEMPORARY testing prefill -- remove before calling this finished.
-    input = "a court of thorns and roses",
+    input = self._search_query or "a court of thorns and roses",
     buttons = {{
       {
         text = _("Cancel"),
-        callback = function() UIManager:close(search_dialog) end,
+        callback = function() UIManager:close(dialog) end,
       },
       {
         text = _("Search"),
         is_enter_default = true,
         callback = function()
-          local query = search_dialog:getInputText()
-          UIManager:close(search_dialog)
-          self:runSearch(query, in_book)
+          local query = dialog:getInputText()
+          UIManager:close(dialog)
+          self._search_query = query
+          self:showSearchPage(in_book)
         end,
       },
     }},
   }
-  UIManager:show(search_dialog)
-  search_dialog:onShowKeyboard()
+  UIManager:show(dialog)
+  dialog:onShowKeyboard()
 end
 
-function ShelfUI:runSearch(query, in_book)
-  if not query or query:match("^%s*$") then
-    return
+-- The search page itself: header (back chevron + title), a search-bar row
+-- (fake field showing the current query/hint + a language chip -- both
+-- just open a popup on tap, see _editSearchQuery/chooseSearchLanguage),
+-- a "Results for..." line, then results or an empty state. Rebuilt (closed
+-- and reopened) on every query/language change rather than updated in
+-- place, same as every other screen here -- self._search_widget tracks
+-- the current instance so a rebuild can close the old one first instead
+-- of stacking a new copy on top.
+function ShelfUI:showSearchPage(in_book)
+  if self._search_widget then
+    UIManager:close(self._search_widget, "full")
+    self._search_widget = nil
   end
-  if not self:requireNetwork() then
-    return
+  if self._search_language == nil then
+    self._search_language = DEFAULT_LANGUAGE
   end
 
-  local user_id = Api:getUserId()
-  if not user_id then
-    UIManager:show(InfoMessage:new{
-      text = _("Could not reach Hardcover. Check your token and connection."),
-      icon = "notice-warning",
-    })
-    return
-  end
+  local query = self._search_query
+  local has_query = query and query:match("%S")
+  local books = {}
 
-  local books = Api:findBooks(query, nil, user_id)
-  if not books or #books == 0 then
-    UIManager:show(InfoMessage:new{ text = _("No results.") })
-    return
+  if has_query then
+    if not self:requireNetwork() then
+      return
+    end
+    local user_id = Api:getUserId()
+    if not user_id then
+      UIManager:show(InfoMessage:new{
+        text = _("Could not reach Hardcover. Check your token and connection."),
+        icon = "notice-warning",
+      })
+      return
+    end
+    books = Api:findBooks(query, nil, user_id) or {}
   end
 
   local item_table = {}
-  for _, book in ipairs(books) do
-    table.insert(item_table, bookListItem(book))
+  local subheader
+  if not has_query then
+    table.insert(item_table, { text = _("Search for a title or author above."), dim = true })
+  elseif #books == 0 then
+    table.insert(item_table, { text = string.format(_('No results for "%s".'), query), dim = true })
+  else
+    for _, book in ipairs(books) do
+      table.insert(item_table, bookListItem(book))
+    end
   end
+  if has_query then
+    subheader = string.format(_('Results for "%s" - %s / Ebook'), query, languageLabel(self._search_language))
+  end
+
+  local opts = {
+    back_button = { icon = "chevron.left" },
+    search_bar = {
+      query_text = query,
+      query_hint = _("Search Hardcover"),
+      language_label = languageCode(self._search_language),
+      on_query_tap = function() self:_editSearchQuery(in_book) end,
+      on_language_tap = function() self:chooseSearchLanguage(in_book) end,
+    },
+    subheader = subheader,
+    on_closed = function() self._search_widget = nil end,
+  }
 
   local opened
   opened = self:_openOverlayList(_("Search Hardcover"), item_table, in_book, function(item)
     UIManager:close(opened.widget, "full")
     self:pickEditionThenStatus(item.book_id, item.title, in_book, function()
       self:_refreshShelf()
-    end)
-  end, { back_button = { icon = "chevron.left" } })
+    end, self._search_language)
+  end, opts)
+  self._search_widget = opened.widget
 end
 
 -- Single entry point: one page showing your Currently Reading shelf, with
@@ -537,7 +626,7 @@ function ShelfUI:show(in_book)
 
   local opts = {
     header_buttons = {
-      { icon = "appbar.search", callback = function() self:showSearchDialog(in_book) end },
+      { icon = "appbar.search", callback = function() self:showSearchPage(in_book) end },
       { icon = "cre.render.reload", callback = function() self:_refreshShelf() end },
       { icon = "close" },
     },
