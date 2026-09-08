@@ -240,6 +240,25 @@ function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
       return
     end
 
+    -- Plants a reading session the moment a book is marked Currently
+    -- Reading, instead of leaving the shelf's progress bar/meta line
+    -- blank until you happen to log a real update on Hardcover's own site
+    -- or app -- that's the only reason no info showed up there earlier,
+    -- not a fetch bug (confirmed by updating progress on the site and
+    -- watching it appear immediately). No page count passed -- Hardcover
+    -- normalizes an explicit 0 to null server-side anyway (confirmed
+    -- live: a session created with progress_pages=0 came back null), and
+    -- lib/book_list.lua's own progress display already treats a nil
+    -- progress_pages as 0% once a session exists, so there's nothing a
+    -- literal 0 would add. Only when nothing's logged yet
+    -- (result.user_book_reads, from the mutation's own response, is this
+    -- user_book's existing most-recent session if any) -- otherwise
+    -- re-affirming Currently Reading on a book you already have real
+    -- progress on would bury it under a fresh empty one.
+    if status_id == CONST.STATUS.READING and not (result.user_book_reads and result.user_book_reads[1]) then
+      Api:createRead(result.id, edition_id, nil, os.date("%Y-%m-%d"))
+    end
+
     if marking_read then
       -- Deferred until the rating picker closes, not shown here -- showing
       -- both at once left this toast sitting on top of the rating picker

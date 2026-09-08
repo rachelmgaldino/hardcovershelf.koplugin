@@ -78,3 +78,16 @@
   first entry left is the most-read match. The per-book language override
   this replaces is gone; the search page's own language chip is now the
   only override, applied before you tap a result.
+- Added `HardcoverApi:createRead`, adapted from `hardcoverapp.koplugin`'s
+  own `insert_user_book_read` mutation (one real bug fixed along the way:
+  upstream checks the wrong response field, so its own version silently
+  returns nothing). Marking a book Currently Reading now plants a reading
+  session automatically if it doesn't already have one, instead of
+  leaving the shelf's progress bar/meta line blank until a real update
+  gets logged through Hardcover's own site or app.
+- Fixed the progress bar/meta line not showing even when a reading
+  session exists: Hardcover normalizes an explicit `progress_pages: 0` to
+  `null` server-side (confirmed live), so requiring a non-null value
+  before showing anything was too strict -- a null `progress_pages` is
+  now treated as 0%, same as the site's own "add an update without
+  changing anything" flow already produces.

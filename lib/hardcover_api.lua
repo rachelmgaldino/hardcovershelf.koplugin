@@ -48,6 +48,12 @@ fragment BookParts on books {
   }
 }]]
 
+-- user_book_reads here is just existence-checking (limit 1, only its id)
+-- -- lets updateUserBook's own caller tell whether this user_book already
+-- has a logged reading session without a second round trip, so
+-- auto-creating one (see createRead below) only ever happens once per
+-- book instead of adding a fresh zero-progress session on every status
+-- change.
 local user_book_fragment = [[
 fragment UserBookParts on user_books {
   id
@@ -56,6 +62,9 @@ fragment UserBookParts on user_books {
   edition_id
   privacy_setting_id
   rating
+  user_book_reads(order_by: { id: desc }, limit: 1) {
+    id
+  }
 }]]
 
 local edition_fragment = [[
@@ -387,6 +396,46 @@ function HardcoverApi:updateRating(user_book_id, rating)
   local result = self:query(query, { id = user_book_id, rating = rating })
   if result and result.update_user_book then
     return result.update_user_book.user_book
+  end
+end
+
+-- Adapted from hardcoverapp.koplugin's own createRead (hardcover_api.lua,
+-- insert_user_book_read), which is what its own "set current page" flow
+-- calls the first time a book gets a progress update, vs. updatePage for
+-- every one after that. One real fix from the source: upstream's own
+-- version checks `result.update_user_book_read` after this exact
+-- `insert_user_book_read` mutation -- always nil, since that's not the
+-- mutation's actual field name -- which would make it silently return
+-- nothing every time; checked against the mutation's own field name
+-- (`insert_user_book_read`) instead. Not otherwise used here for the
+-- normal page-tracking hardcoverapp itself does (this plugin doesn't
+-- track document position at all) -- only to plant a zero-progress
+-- session so a book has one to display as soon as it's marked Currently
+-- Reading, instead of only after a first manual update on Hardcover's
+-- own site or app.
+function HardcoverApi:createRead(user_book_id, edition_id, page, started_at)
+  local query = [[
+    mutation ($id: Int!, $pages: Int, $editionId: Int, $startedAt: date) {
+      insert_user_book_read(user_book_id: $id, user_book_read: {
+        progress_pages: $pages,
+        edition_id: $editionId,
+        started_at: $startedAt,
+      }) {
+        error
+        user_book_read {
+          id
+          started_at
+          finished_at
+          edition_id
+          progress_pages
+        }
+      }
+    }
+  ]]
+
+  local result = self:query(query, { id = user_book_id, pages = page, editionId = edition_id, startedAt = started_at })
+  if result and result.insert_user_book_read then
+    return result.insert_user_book_read.user_book_read
   end
 end
 

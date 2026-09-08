@@ -228,13 +228,22 @@ end
 -- record exist -- most books, including every manga volume read through
 -- Rakuyomi, have neither, so this is silently absent for them rather than
 -- showing an empty or zeroed-out bar.
+--
+-- progress_pages itself is treated as 0 when nil, not as "no session" --
+-- Hardcover's own API normalizes an explicit 0 to null server-side
+-- (confirmed live: a freshly-created zero-progress session comes back
+-- with progress_pages: null, not 0), and manually adding a progress
+-- update on Hardcover's own site without changing anything leaves it the
+-- same way. A session existing at all, regardless of its progress_pages
+-- value, is what "started reading, 0% so far" actually means here.
 local function buildProgressSection(item, width)
   local progress = item.reading_progress
-  if not progress or not progress.progress_pages or not item.pages or item.pages <= 0 then
+  if not progress or not item.pages or item.pages <= 0 then
     return nil
   end
 
-  local pct = progress.progress_pages / item.pages
+  local pages_read = progress.progress_pages or 0
+  local pct = pages_read / item.pages
   if pct < 0 then pct = 0 end
   if pct > 1 then pct = 1 end
 
