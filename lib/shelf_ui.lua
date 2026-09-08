@@ -31,14 +31,6 @@ local status_labels = {
   [CONST.STATUS.DNF] = _("Did Not Finish"),
 }
 
--- hardcoverapp's Book:readingFormat table (index 3 is deliberately unused
--- upstream too -- Hardcover's reading_format_id has no value 3).
-local reading_format_labels = {
-  [1] = _("Physical Book"),
-  [2] = _("Audiobook"),
-  [4] = _("E-Book"),
-}
-
 local EBOOK_FORMAT_ID = 4
 
 local EMPTY_ROW_ID = "__empty__"
@@ -108,27 +100,6 @@ local function bookListItem(book)
     book_id = book.book_id,
     pages = book.pages,
     reading_progress = book.reading_progress,
-  }
-end
-
-local function editionListItem(edition)
-  local format = edition.edition_format
-  if not format or format == "" then
-    format = reading_format_labels[edition.reading_format_id] or _("Unknown format")
-  end
-  local text = format
-  if edition.publisher and edition.publisher.name then
-    text = text .. " - " .. edition.publisher.name
-  end
-  if edition.release_date then
-    local year = edition.release_date:match("^(%d%d%d%d)-")
-    if year then
-      text = text .. " (" .. year .. ")"
-    end
-  end
-  return {
-    text = text,
-    edition_id = edition.id,
   }
 end
 
@@ -306,7 +277,6 @@ local LANGUAGE_LABELS = {
   pt = _("Portuguese"),
 }
 local DEFAULT_LANGUAGE = "en"
-local LANGUAGE_ROW_ID = "__language__"
 
 local function languageLabel(code)
   if not code or code == "all" then
@@ -326,10 +296,9 @@ local function languageCode(code)
   return code:upper()
 end
 
--- Shared option list (English/Portuguese/All/a typed code) behind both
--- the per-book edition-picker override (showLanguageChooser, below) and
--- the search page's language chip -- same underlying chooser, just
--- wired to a different "what happens after you pick" callback.
+-- Option list (English/Portuguese/All/a typed code) behind the search
+-- page's language chip (chooseSearchLanguage, below) -- factored out on
+-- its own in case a second caller needs the same picker again later.
 local function chooseLanguageOptions(current, on_pick)
   local dialog
   local function pick(code)
@@ -387,14 +356,11 @@ local function filterByLanguage(editions, code)
   return filtered
 end
 
-function ShelfUI:showLanguageChooser(book_id, title, author, in_book, on_done, current)
-  chooseLanguageOptions(current, function(code)
-    self:pickEditionThenStatus(book_id, title, author, in_book, on_done, code)
-  end)
-end
-
--- Same chooser, wired to the search page's persistent language filter
--- instead of a single book's edition pick.
+-- Wired to the search page's persistent language filter -- the only
+-- remaining language override, now that pickEditionThenStatus below no
+-- longer shows a picker screen of its own to host a per-book one. Set
+-- this before tapping a search result to link the rare book actually
+-- being read in a language other than the current default.
 function ShelfUI:chooseSearchLanguage(in_book)
   chooseLanguageOptions(self._search_language, function(code)
     self._search_language = code
@@ -408,22 +374,20 @@ end
 -- edition_id on an existing link aren't confirmed, so this deliberately
 -- doesn't touch it).
 --
--- Defaults to an ebook edition in English -- Hardcover returns print,
--- audio and ebook editions in every language it knows about for a book,
--- which is a lot of noise to hand-pick from when you're reading on a
--- Kindle and only ever want the ebook. Widens language before format: if
--- there's an ebook but not in English, that's still the right edition; if
--- there's no ebook at all (their database is younger than Goodreads', so
--- this happens), fall back to every edition and say so explicitly, so a
--- print/audio result reads as "nothing else was available" rather than a
--- bug. Always shows the edition picker screen, even for a single clean
--- match -- the language button on it is a deliberate per-book override for
--- the rare book actually being read in another language, not just a
--- resolver for ambiguous results, so it has to stay reachable every time.
+-- Auto-links the matching edition with the most Hardcover readers,
+-- instead of making you pick between several near-duplicate ebook
+-- editions of the same book by hand: findEditions already orders its
+-- results by users_count desc_nulls_last (confirmed live against the
+-- API), and filtering preserves that order, so the first entry left
+-- after narrowing to ebook + language is the most-read match. Widens
+-- language before format: if there's an ebook but not in the requested
+-- language, that's still the right edition; if there's no ebook at all
+-- (their database is younger than Goodreads', so this happens), fall
+-- back to every edition (still most-read first) and say so explicitly,
+-- so a print/audio pick reads as "nothing else was available" rather
+-- than a bug.
 function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done, language_filter)
-  if language_filter == nil then
-    language_filter = DEFAULT_LANGUAGE
-  end
+  language_filter = language_filter or DEFAULT_LANGUAGE
 
   if not self:requireNetwork() then
     on_done()
@@ -437,54 +401,30 @@ function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done,
   if #editions == 0 and #ebook_editions > 0 then
     -- Ebook editions exist, just not in the requested language.
     editions = ebook_editions
-    language_filter = "all"
   end
 
-  local no_ebook = false
   if #editions == 0 then
-    -- No ebook edition at all for this book -- show whatever exists
-    -- instead of a dead end, and say clearly why.
-    no_ebook = true
+    -- No ebook edition at all for this book -- fall back to whatever
+    -- exists instead of a dead end.
     editions = filterByLanguage(all_editions, language_filter)
     if #editions == 0 then
       editions = all_editions
-      language_filter = "all"
     end
-  end
-
-  if no_ebook then
+    if #editions == 0 then
+      UIManager:show(InfoMessage:new{
+        text = _("No editions found for this book."),
+        icon = "notice-warning",
+      })
+      on_done()
+      return
+    end
     UIManager:show(InfoMessage:new{
-      text = _("No ebook/Kindle edition found for this book -- showing other formats too."),
+      text = _("No ebook/Kindle edition found for this book -- using the most-read other format instead."),
       timeout = 3,
     })
   end
 
-  -- Always show this screen, even when there's only one edition to pick --
-  -- the language button is a deliberate per-book override (almost never
-  -- needed, since English/ebook is the right default nearly every time),
-  -- not just a resolver for ambiguous results. A book that's actually
-  -- being read in Portuguese still needs that override reachable, and it
-  -- wouldn't be if a clean single English match skipped this screen
-  -- entirely.
-  local language_row = {
-    text = "[" .. languageLabel(language_filter) .. "] " .. _("change language..."),
-    row_id = LANGUAGE_ROW_ID,
-    accent = true,
-  }
-  local item_table = { language_row }
-  for _, edition in ipairs(editions) do
-    table.insert(item_table, editionListItem(edition))
-  end
-
-  local opened
-  opened = self:_openOverlayList(_("Select edition: ") .. title, item_table, in_book, function(item)
-    UIManager:close(opened.widget, "full")
-    if item.row_id == LANGUAGE_ROW_ID then
-      self:showLanguageChooser(book_id, title, author, in_book, on_done, language_filter)
-      return
-    end
-    self:showStatusPicker(book_id, title, author, item.edition_id, on_done)
-  end)
+  self:showStatusPicker(book_id, title, author, editions[1].id, on_done)
 end
 
 -- Opens a plain InputDialog (the same popup search always used) prefilled

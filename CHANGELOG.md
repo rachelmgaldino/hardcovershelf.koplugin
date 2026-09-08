@@ -70,3 +70,11 @@
   the rating picker. Dims the screen behind it via Blitbuffer's own
   `:darkenRect()` (real alpha blending against whatever's already
   painted, not a flat fill overwriting it).
+- Auto-links the ebook edition with the most Hardcover readers for a
+  newly-added book, instead of showing a picker screen to choose between
+  near-duplicate editions by hand: `findEditions` already returns results
+  ordered by `users_count desc_nulls_last` (confirmed live against the
+  API), and filtering by format/language preserves that order, so the
+  first entry left is the most-read match. The per-book language override
+  this replaces is gone; the search page's own language chip is now the
+  only override, applied before you tap a result.
