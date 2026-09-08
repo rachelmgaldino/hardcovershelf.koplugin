@@ -9,6 +9,7 @@ local _ = require("gettext")
 local Api = require("lib/hardcover_api")
 local BookList = require("lib/book_list")
 local CONST = require("lib/constants")
+local StatusPicker = require("lib/status_picker")
 
 local ShelfUI = {
   -- kept so a status/rating change made from a nested overlay can refresh
@@ -242,11 +243,15 @@ function ShelfUI:showRatingPicker(user_book_id, title, on_done)
   UIManager:show(spinner)
 end
 
-function ShelfUI:showStatusPicker(book_id, title, edition_id, on_done)
-  local dialog
+local STATUS_OPTIONS = {
+  { id = CONST.STATUS.TO_READ, label = status_labels[CONST.STATUS.TO_READ] },
+  { id = CONST.STATUS.READING, label = status_labels[CONST.STATUS.READING] },
+  { id = CONST.STATUS.FINISHED, label = status_labels[CONST.STATUS.FINISHED] },
+  { id = CONST.STATUS.DNF, label = status_labels[CONST.STATUS.DNF] },
+}
 
+function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
   local function pick(status_id)
-    UIManager:close(dialog)
     if not self:requireNetwork() then
       on_done()
       return
@@ -284,16 +289,13 @@ function ShelfUI:showStatusPicker(book_id, title, edition_id, on_done)
     end
   end
 
-  dialog = ButtonDialog:new{
+  StatusPicker.show{
     title = title,
-    buttons = {
-      { { text = status_labels[CONST.STATUS.TO_READ], callback = function() pick(CONST.STATUS.TO_READ) end } },
-      { { text = status_labels[CONST.STATUS.READING], callback = function() pick(CONST.STATUS.READING) end } },
-      { { text = status_labels[CONST.STATUS.FINISHED], callback = function() pick(CONST.STATUS.FINISHED) end } },
-      { { text = status_labels[CONST.STATUS.DNF], callback = function() pick(CONST.STATUS.DNF) end } },
-    },
+    author = author,
+    options = STATUS_OPTIONS,
+    read_id = CONST.STATUS.FINISHED,
+    on_pick = pick,
   }
-  UIManager:show(dialog)
 end
 
 -- code2 -> button label, for the language-filter chooser. Not every
@@ -385,9 +387,9 @@ local function filterByLanguage(editions, code)
   return filtered
 end
 
-function ShelfUI:showLanguageChooser(book_id, title, in_book, on_done, current)
+function ShelfUI:showLanguageChooser(book_id, title, author, in_book, on_done, current)
   chooseLanguageOptions(current, function(code)
-    self:pickEditionThenStatus(book_id, title, in_book, on_done, code)
+    self:pickEditionThenStatus(book_id, title, author, in_book, on_done, code)
   end)
 end
 
@@ -418,7 +420,7 @@ end
 -- match -- the language button on it is a deliberate per-book override for
 -- the rare book actually being read in another language, not just a
 -- resolver for ambiguous results, so it has to stay reachable every time.
-function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, language_filter)
+function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done, language_filter)
   if language_filter == nil then
     language_filter = DEFAULT_LANGUAGE
   end
@@ -478,10 +480,10 @@ function ShelfUI:pickEditionThenStatus(book_id, title, in_book, on_done, languag
   opened = self:_openOverlayList(_("Select edition: ") .. title, item_table, in_book, function(item)
     UIManager:close(opened.widget, "full")
     if item.row_id == LANGUAGE_ROW_ID then
-      self:showLanguageChooser(book_id, title, in_book, on_done, language_filter)
+      self:showLanguageChooser(book_id, title, author, in_book, on_done, language_filter)
       return
     end
-    self:showStatusPicker(book_id, title, item.edition_id, on_done)
+    self:showStatusPicker(book_id, title, author, item.edition_id, on_done)
   end)
 end
 
@@ -593,7 +595,7 @@ function ShelfUI:showSearchPage(in_book)
   local opened
   opened = self:_openOverlayList(_("Search Hardcover"), item_table, in_book, function(item)
     UIManager:close(opened.widget, "full")
-    self:pickEditionThenStatus(item.book_id, item.title, in_book, function()
+    self:pickEditionThenStatus(item.book_id, item.title, item.author, in_book, function()
       self:_refreshShelf()
     end, self._search_language)
   end, opts)
@@ -638,7 +640,7 @@ function ShelfUI:show(in_book)
       self:_refreshShelf()
       return
     end
-    self:showStatusPicker(item.book_id, item.title, nil, function()
+    self:showStatusPicker(item.book_id, item.title, item.author, nil, function()
       self:_refreshShelf()
     end)
   end, opts)

@@ -62,3 +62,11 @@
   content + padding + border, ignoring any forced size): the cover
   placeholder's initial letter rendering off-center, and the search
   field/language chip corrupting each other's position.
+- Replaced the status picker's stock `ButtonDialog` with a custom modal
+  (`lib/status_picker.lua`) matching the design handoff: a 2x2 grid of
+  status tiles that only mark a selection (inverting to filled black with
+  a checkmark) rather than committing immediately, a Done button that's
+  disabled until one is chosen, and Read still auto-advancing straight to
+  the rating picker. Dims the screen behind it via Blitbuffer's own
+  `:darkenRect()` (real alpha blending against whatever's already
+  painted, not a flat fill overwriting it).

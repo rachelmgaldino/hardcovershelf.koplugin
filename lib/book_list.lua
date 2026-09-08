@@ -923,4 +923,11 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
   return top_widget
 end
 
+-- Exposed so other custom modal widgets (e.g. lib/status_picker.lua) can
+-- build the same bordered-icon-square chrome and the same "make an
+-- already-built widget tappable" wrapper this file already uses,
+-- instead of duplicating either construction.
+BookList.buildIconButton = buildIconButton
+BookList.TapArea = TapArea
+
 return BookList
