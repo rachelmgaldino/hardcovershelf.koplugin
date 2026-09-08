@@ -914,24 +914,17 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
     })
   end
 
-  -- In-book: size to the actual content (header + rows) instead of
-  -- always stretching to the same near-full-screen height regardless of
-  -- how many rows there are -- a shelf with two or three books was
-  -- filling almost the whole screen with empty space below them, since
-  -- rows got a lot taller in this redesign (cover placeholder, progress
-  -- bar) than the plain-text rows this sizing was originally set up for.
-  -- Capped well short of the full screen (not just screen_h - 50px) so
-  -- even a long, genuinely-scrolling result list still reads as a small
-  -- popup over the book rather than something that can grow to nearly
-  -- fill it -- a longer list scrolls inside that cap instead of pushing
-  -- the card taller. The non-in-book shelf/search pages keep filling the
-  -- full screen regardless of content, as before.
+  -- In-book: a fixed height, the same across the shelf and the search
+  -- page regardless of how many rows either has -- a short list just
+  -- leaves blank space below it rather than shrinking the card, so the
+  -- overlay doesn't visibly change size depending on which screen you're
+  -- on. A longer list still scrolls inside this same fixed height instead
+  -- of growing past it. The non-in-book shelf/search pages keep filling
+  -- the full screen regardless of content, as before.
   local header_h = header_stack:getSize().h
   local height
   if in_book then
-    local natural_content_h = header_h + rows:getSize().h
-    local max_content_h = math.floor(screen_h * IN_BOOK_MAX_HEIGHT_FRACTION)
-    height = math.min(natural_content_h, max_content_h)
+    height = math.floor(screen_h * IN_BOOK_MAX_HEIGHT_FRACTION)
   else
     height = screen_h
   end

@@ -91,9 +91,12 @@
   before showing anything was too strict -- a null `progress_pages` is
   now treated as 0%, same as the site's own "add an update without
   changing anything" flow already produces.
-- Sized the in-book overlay (opened from inside a document, a small
-  centered card rather than a full screen) to its actual content instead
-  of always stretching to almost the full screen height regardless of row
-  count, and scaled its header/row fonts and padding down to fit that
-  smaller card -- both scoped to the in-book path specifically, the
-  full-screen shelf/search pages are unchanged.
+- Shrank the in-book overlay (opened from inside a document, a small
+  centered card rather than a full screen) instead of always stretching
+  to almost the full screen height, and scaled its header/row fonts and
+  padding down to fit that smaller card -- both scoped to the in-book
+  path specifically, the full-screen shelf/search pages are unchanged.
+  Settled on a fixed height (a set fraction of the screen) rather than
+  fitting actual row count, so the shelf and search overlays are always
+  the same size regardless of how many rows either has -- a short list
+  just leaves blank space below it, a long one scrolls.
