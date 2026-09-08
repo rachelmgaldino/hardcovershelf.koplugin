@@ -3,12 +3,15 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local NetworkManager = require("ui/network/manager")
 local SpinWidget = require("ui/widget/spinwidget")
+local Trapper = require("ui/trapper")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 
 local Api = require("lib/hardcover_api")
 local BookList = require("lib/book_list")
 local CONST = require("lib/constants")
+local CoverCache = require("lib/cover_cache")
+local CoverLoader = require("lib/cover_loader")
 local StatusPicker = require("lib/status_picker")
 
 local ShelfUI = {
@@ -22,7 +25,16 @@ local ShelfUI = {
   _search_widget = nil,
   _search_query = nil,
   _search_language = nil,
+  -- How many of the current query's results are actually shown/have
+  -- their covers prefetched -- nil means SEARCH_PAGE_SIZE (the default,
+  -- reset whenever a new query runs). findBooks already returns up to 25
+  -- results in one request; this is purely about not blocking on
+  -- prefetching every one of their covers up front when only the first
+  -- handful are visible without scrolling.
+  _search_visible_count = nil,
 }
+
+local SEARCH_PAGE_SIZE = 5
 
 local status_labels = {
   [CONST.STATUS.TO_READ] = _("Want to Read"),
@@ -34,6 +46,7 @@ local status_labels = {
 local EBOOK_FORMAT_ID = 4
 
 local EMPTY_ROW_ID = "__empty__"
+local LOAD_MORE_ROW_ID = "__load_more__"
 
 -- reading_format_id == nil (edition has no format set) is kept, same
 -- reasoning as filterByLanguage below: unset isn't the same as "wrong".
@@ -92,7 +105,16 @@ end
 -- string) so book_list.lua can style them differently -- bold title,
 -- gray author -- and size each independently against the actual space
 -- left after the series tag, if any.
+-- cached_image is a real, opaque `json` scalar on the `books` type
+-- (confirmed live: { id, url, color, width, height, color_name }) -- only
+-- url/width/height are what book_list.lua needs to actually render one.
 local function bookListItem(book)
+  local cover_url, cover_w, cover_h
+  if book.cached_image and book.cached_image.url then
+    cover_url = book.cached_image.url
+    cover_w = book.cached_image.width
+    cover_h = book.cached_image.height
+  end
   return {
     title = book.title,
     author = mainAuthor(book),
@@ -100,6 +122,9 @@ local function bookListItem(book)
     book_id = book.book_id,
     pages = book.pages,
     reading_progress = book.reading_progress,
+    cover_url = cover_url,
+    cover_w = cover_w,
+    cover_h = cover_h,
   }
 end
 
@@ -112,6 +137,52 @@ function ShelfUI:requireNetwork()
     return false
   end
   return true
+end
+
+-- Downloads and caches any of `books`' covers that aren't already on
+-- disk, THEN calls `continue_fn` -- covers are ready before the list
+-- they belong to is even built, rather than the list showing first with
+-- placeholders and the cache only catching up for a future rebuild.
+-- That "catch up next time" version is still what lib/book_list.lua
+-- itself falls back to for any row this doesn't cover, but it's a poor
+-- primary strategy for a screen like search results, which is rarely the
+-- exact same list twice -- there usually isn't a meaningful "next time"
+-- for it to catch up on.
+--
+-- Trapper:dismissableRunInSubprocess (what the actual downloading goes
+-- through, lib/cover_loader.lua's own prefetchAll) needs to run inside a
+-- coroutine, and, more importantly, doesn't block its caller's own stack
+-- by itself -- Trapper:wrap's coroutine.resume() returns as soon as the
+-- wrapped function first yields, not when it finishes -- so `continue_fn`
+-- has to run *inside* that same wrapped function, after the prefetch
+-- call, rather than as ordinary code placed after this one returns.
+local function prefetchCoversThen(books, continue_fn)
+  local pending = {}
+  for _, book in ipairs(books) do
+    local cover = book.cached_image
+    if cover and cover.url and not CoverCache:isCached(book.book_id, cover.url) then
+      table.insert(pending, {
+        url = cover.url,
+        on_loaded = function(content)
+          CoverCache:save(book.book_id, cover.url, content)
+        end,
+      })
+    end
+  end
+
+  if #pending == 0 then
+    continue_fn()
+    return
+  end
+
+  Trapper:wrap(function()
+    local msg = InfoMessage:new{ text = _("Loading covers...") }
+    UIManager:show(msg)
+    UIManager:forceRePaint()
+    CoverLoader.prefetchAll(pending)
+    UIManager:close(msg)
+    continue_fn()
+  end)
 end
 
 -- Builds and shows the custom list (lib/book_list.lua) as an overlay ON
@@ -478,6 +549,7 @@ function ShelfUI:_editSearchQuery(in_book)
           local query = dialog:getInputText()
           UIManager:close(dialog)
           self._search_query = query
+          self._search_visible_count = nil
           self:showSearchPage(in_book)
         end,
       },
@@ -523,42 +595,83 @@ function ShelfUI:showSearchPage(in_book)
     books = Api:findBooks(query, nil, user_id) or {}
   end
 
-  local item_table = {}
-  local subheader
-  if not has_query then
-    table.insert(item_table, { text = _("Search for a title or author above."), dim = true })
-  elseif #books == 0 then
-    table.insert(item_table, { text = string.format(_('No results for "%s".'), query), dim = true })
-  else
-    for _, book in ipairs(books) do
-      table.insert(item_table, bookListItem(book))
+  -- Only the visible slice gets its covers prefetched -- findBooks can
+  -- return up to 25 results in one request, and blocking on every one of
+  -- their covers before showing anything was the actual slow part, not
+  -- the search itself. "Load more" just reveals (and prefetches) another
+  -- page of what's already been fetched, not a new API call.
+  local visible_count = math.min(self._search_visible_count or SEARCH_PAGE_SIZE, #books)
+  local visible_books = {}
+  for i = 1, visible_count do
+    table.insert(visible_books, books[i])
+  end
+
+  prefetchCoversThen(visible_books, function()
+    local item_table = {}
+    local subheader
+    if not has_query then
+      table.insert(item_table, { text = _("Search for a title or author above."), dim = true })
+    elseif #books == 0 then
+      table.insert(item_table, { text = string.format(_('No results for "%s".'), query), dim = true })
+    else
+      for _, book in ipairs(visible_books) do
+        table.insert(item_table, bookListItem(book))
+      end
+      if #books > visible_count then
+        table.insert(item_table, {
+          text = string.format(_("Show %d more results"), math.min(SEARCH_PAGE_SIZE, #books - visible_count)),
+          row_id = LOAD_MORE_ROW_ID,
+          accent = true,
+        })
+      end
     end
-  end
-  if has_query then
-    subheader = string.format(_('Results for "%s" - %s / Ebook'), query, languageLabel(self._search_language))
-  end
+    if has_query then
+      subheader = string.format(_('Results for "%s" - %s / Ebook'), query, languageLabel(self._search_language))
+    end
 
-  local opts = {
-    back_button = { icon = "chevron.left" },
-    search_bar = {
-      query_text = query,
-      query_hint = _("Search Hardcover"),
-      language_label = languageCode(self._search_language),
-      on_query_tap = function() self:_editSearchQuery(in_book) end,
-      on_language_tap = function() self:chooseSearchLanguage(in_book) end,
-    },
-    subheader = subheader,
-    on_closed = function() self._search_widget = nil end,
-  }
+    local opts = {
+      back_button = { icon = "chevron.left" },
+      -- Closes the shelf too, not just this search overlay -- dismisses
+      -- the whole plugin in one tap instead of needing back-to-shelf
+      -- then its own X.
+      close_button = {
+        icon = "close",
+        callback = function()
+          if self._search_widget then
+            UIManager:close(self._search_widget, "full")
+            self._search_widget = nil
+          end
+          if self._shelf_widget then
+            UIManager:close(self._shelf_widget, "full")
+            self._shelf_widget = nil
+          end
+        end,
+      },
+      search_bar = {
+        query_text = query,
+        query_hint = _("Search Hardcover"),
+        language_label = languageCode(self._search_language),
+        on_query_tap = function() self:_editSearchQuery(in_book) end,
+        on_language_tap = function() self:chooseSearchLanguage(in_book) end,
+      },
+      subheader = subheader,
+      on_closed = function() self._search_widget = nil end,
+    }
 
-  local opened
-  opened = self:_openOverlayList(_("Search Hardcover"), item_table, in_book, function(item)
-    UIManager:close(opened.widget, "full")
-    self:pickEditionThenStatus(item.book_id, item.title, item.author, in_book, function()
-      self:_refreshShelf()
-    end, self._search_language)
-  end, opts)
-  self._search_widget = opened.widget
+    local opened
+    opened = self:_openOverlayList(_("Search Hardcover"), item_table, in_book, function(item)
+      if item.row_id == LOAD_MORE_ROW_ID then
+        self._search_visible_count = visible_count + SEARCH_PAGE_SIZE
+        self:showSearchPage(in_book)
+        return
+      end
+      UIManager:close(opened.widget, "full")
+      self:pickEditionThenStatus(item.book_id, item.title, item.author, in_book, function()
+        self:_refreshShelf()
+      end, self._search_language)
+    end, opts)
+    self._search_widget = opened.widget
+  end)
 end
 
 -- Single entry point: one page showing your Currently Reading shelf, with
@@ -583,27 +696,29 @@ function ShelfUI:show(in_book)
 
   local books = Api:listByStatus(CONST.STATUS.READING, user_id) or {}
 
-  local subheader = string.format(_("Currently Reading - %d books"), #books)
+  prefetchCoversThen(books, function()
+    local subheader = string.format(_("Currently Reading - %d books"), #books)
 
-  local opts = {
-    header_buttons = {
-      { icon = "appbar.search", callback = function() self:showSearchPage(in_book) end },
-      { icon = "cre.render.reload", callback = function() self:_refreshShelf() end },
-      { icon = "close" },
-    },
-    subheader = subheader,
-  }
+    local opts = {
+      header_buttons = {
+        { icon = "appbar.search", callback = function() self:showSearchPage(in_book) end },
+        { icon = "cre.render.reload", callback = function() self:_refreshShelf() end },
+        { icon = "close" },
+      },
+      subheader = subheader,
+    }
 
-  local opened = self:_openOverlayList(_("Hardcover Shelf"), self:_shelfItemTable(books), in_book, function(item)
-    if item.row_id == EMPTY_ROW_ID then
-      self:_refreshShelf()
-      return
-    end
-    self:showStatusPicker(item.book_id, item.title, item.author, nil, function()
-      self:_refreshShelf()
-    end)
-  end, opts)
-  self._shelf_widget = opened.widget
+    local opened = self:_openOverlayList(_("Hardcover Shelf"), self:_shelfItemTable(books), in_book, function(item)
+      if item.row_id == EMPTY_ROW_ID then
+        self:_refreshShelf()
+        return
+      end
+      self:showStatusPicker(item.book_id, item.title, item.author, nil, function()
+        self:_refreshShelf()
+      end)
+    end, opts)
+    self._shelf_widget = opened.widget
+  end)
 end
 
 return ShelfUI

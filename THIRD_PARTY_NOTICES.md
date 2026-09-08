@@ -1,8 +1,9 @@
 # Third-party notices
 
-`lib/hardcover_api.lua` and `lib/table_util.lua` are trimmed, adapted copies
-of code from `hardcoverapp.koplugin` (https://github.com/billiam/hardcoverapp.koplugin),
-Copyright (c) 2024 Billiam, MIT License:
+`lib/hardcover_api.lua`, `lib/table_util.lua`, and `lib/cover_loader.lua` are
+trimmed, adapted copies of code from `hardcoverapp.koplugin`
+(https://github.com/billiam/hardcoverapp.koplugin), Copyright (c) 2024
+Billiam, MIT License:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

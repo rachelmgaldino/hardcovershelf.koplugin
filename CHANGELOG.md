@@ -100,3 +100,19 @@
   fitting actual row count, so the shelf and search overlays are always
   the same size regardless of how many rows either has -- a short list
   just leaves blank space below it, a long one scrolls.
+- Real cover images, replacing the placeholder box + initial letter.
+  Fetched from Hardcover's own `cached_image` field (already requested,
+  never used until now) and cached to disk (`lib/cover_cache.lua`), one
+  file per book. Covers are fetched and cached *before* a list is built,
+  not after -- an earlier version showed the list first and warmed the
+  cache for a future rebuild, which works for the shelf but is close to
+  useless for search results, rarely the same list twice.
+- Search results only prefetch covers for and show the first 5 matches,
+  with a "Show N more results" row to reveal (and prefetch) further pages
+  of what's already been fetched -- findBooks already returns up to 25 in
+  one request, and blocking on every one of their covers up front, not
+  just the ones actually visible, was the slow part.
+- Added a close button to the search results header (previously only
+  reachable from the shelf), closing the shelf underneath it too rather
+  than just the search overlay -- dismisses the whole plugin in one tap
+  instead of needing back-to-shelf, then its own close.

@@ -26,6 +26,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local IconButton = require("ui/widget/iconbutton")
 local IconWidget = require("ui/widget/iconwidget")
+local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
@@ -39,6 +40,9 @@ local TextWidget = require("ui/widget/textwidget")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local _ = require("gettext")
+
+local CoverCache = require("lib/cover_cache")
+local CoverLoader = require("lib/cover_loader")
 
 local Screen = Device.screen
 local S = function(px) return Screen:scaleBySize(px) end
@@ -213,6 +217,50 @@ local function buildCoverPlaceholder(title)
       letter,
     },
   }
+end
+
+-- Real cover when it's already been fetched and cached to disk (a plain
+-- ImageWidget, scale_factor=0 so it's fit-within-bounds keeping its own
+-- aspect ratio rather than stretched to exactly COVER_W x COVER_H);
+-- otherwise the letter placeholder, plus a descriptor for the caller to
+-- queue a background fetch so the *next* time this book's row is built,
+-- its real cover is already on disk. No live swap-in on THIS view once
+-- the fetch finishes -- rebuilding the on-screen row from inside an
+-- async callback risks corrupting whatever ScrollableContainer/e-ink
+-- partial-refresh state is live at that moment, which isn't something
+-- worth risking blind, without a device to actually watch it happen on.
+-- A cover that's slow to appear (next open, not this one) is a small
+-- price for that.
+local function buildCover(item)
+  if item.cover_url and CoverCache:isCached(item.book_id, item.cover_url) then
+    local image = ImageWidget:new{
+      file = CoverCache:path(item.book_id, item.cover_url),
+      width = COVER_W - 2 * BORDER,
+      height = COVER_H - 2 * BORDER,
+      scale_factor = 0,
+    }
+    return FrameContainer:new{
+      bordersize = BORDER,
+      color = INK,
+      background = Blitbuffer.COLOR_WHITE,
+      radius = 0,
+      padding = 0,
+      margin = 0,
+      width = COVER_W,
+      height = COVER_H,
+      CenterContainer:new{
+        dimen = Geom:new{ w = COVER_W - 2 * BORDER, h = COVER_H - 2 * BORDER },
+        image,
+      },
+    }, nil
+  end
+
+  local placeholder = buildCoverPlaceholder(item.title)
+  local prefetch
+  if item.cover_url then
+    prefetch = { book_id = item.book_id, url = item.cover_url }
+  end
+  return placeholder, prefetch
 end
 
 local MONTH_NAMES = {
@@ -412,6 +460,7 @@ local BookRow = InputContainer:extend{
   callback = nil,
   show_parent = nil,
   in_book = nil,
+  pending_covers = nil, -- shared table this row appends a { book_id, url } to if its cover needs fetching
 }
 
 function BookRow:init()
@@ -442,9 +491,14 @@ function BookRow:init()
     local lines = buildRowText(self.item, text_col_width, self.in_book)
     local lines_h = math.max(lines:getSize().h, COVER_H)
 
+    local cover, prefetch = buildCover(self.item)
+    if prefetch and self.pending_covers then
+      table.insert(self.pending_covers, prefetch)
+    end
+
     content = HorizontalGroup:new{
       align = "top",
-      buildCoverPlaceholder(self.item.title),
+      cover,
       HorizontalSpan:new{ width = ROW_GAP },
       LeftContainer:new{
         dimen = Geom:new{ w = text_col_width, h = lines:getSize().h },
@@ -629,16 +683,31 @@ end
 -- picker) -- a different shape from the shelf's spread header, not the
 -- same one with fewer buttons: the title sits right next to the button
 -- here, it doesn't get pushed to the opposite edge.
-local function buildLeadingHeader(title, width, back_button, in_book)
+-- close_button (optional) pins a second bordered icon button to the
+-- right edge of the same row -- e.g. search results' own "X" for
+-- dismissing the whole plugin without first going back to the shelf and
+-- closing it from there. Same OverlapGroup + Left/RightContainer shape
+-- buildSpreadHeader already uses for pinning its own buttons to the
+-- right edge, layered on top of this row instead of the plain title
+-- widget spread uses on its left side.
+local function buildLeadingHeader(title, width, back_button, in_book, close_button)
   local h_padding = in_book and IN_BOOK_HEADER_H_PADDING or HEADER_H_PADDING
   local v_padding = in_book and IN_BOOK_LEADING_V_PADDING or LEADING_V_PADDING
   local title_face_size = in_book and IN_BOOK_LEADING_TITLE_FACE_SIZE or LEADING_TITLE_FACE_SIZE
+  local inner_w = width - 2 * h_padding
+
+  local close_frame, close_icon_btn
+  local close_reserved = 0
+  if close_button then
+    close_frame, close_icon_btn = buildIconButton(close_button.icon, close_button.callback, LEADING_BTN_SIZE)
+    close_reserved = LEADING_BTN_SIZE + LEADING_GAP
+  end
 
   local frame, icon_btn = buildIconButton(back_button.icon, back_button.callback, LEADING_BTN_SIZE)
   local title_widget = TextWidget:new{
     text = title,
     face = Font:getFace(SERIF_BOLD, title_face_size),
-    max_width = width - 2 * h_padding - LEADING_BTN_SIZE - LEADING_GAP,
+    max_width = inner_w - LEADING_BTN_SIZE - LEADING_GAP - close_reserved,
   }
 
   local row = HorizontalGroup:new{
@@ -647,6 +716,19 @@ local function buildLeadingHeader(title, width, back_button, in_book)
     HorizontalSpan:new{ width = LEADING_GAP },
     title_widget,
   }
+
+  local icon_btns = { icon_btn }
+  local content = row
+  if close_button then
+    local row_h = math.max(row:getSize().h, LEADING_BTN_SIZE)
+    content = OverlapGroup:new{
+      dimen = Geom:new{ w = inner_w, h = row_h },
+      allow_mirroring = false,
+      LeftContainer:new{ dimen = Geom:new{ w = inner_w, h = row_h }, row },
+      RightContainer:new{ dimen = Geom:new{ w = inner_w, h = row_h }, close_frame },
+    }
+    table.insert(icon_btns, close_icon_btn)
+  end
 
   local padded = FrameContainer:new{
     bordersize = 0,
@@ -657,14 +739,14 @@ local function buildLeadingHeader(title, width, back_button, in_book)
     padding_right = h_padding,
     margin = 0,
     width = width,
-    row,
+    content,
   }
 
   return VerticalGroup:new{
     align = "left",
     padded,
     LineWidget:new{ dimen = Geom:new{ w = width, h = Size.line.thin }, background = HEADER_DIVIDER_COLOR },
-  }, { icon_btn }
+  }, icon_btns
 end
 
 -- Subheader strip below the header, e.g. "Currently Reading - 6 books -
@@ -847,6 +929,11 @@ local BookList = {}
 --     header (title left, buttons right).
 --   back_button = { icon, callback } -- search/language-picker-style
 --     leading header (back button, then title).
+--   close_button = { icon, callback } -- optional second button pinned
+--     to the right edge of a leading header (only meaningful alongside
+--     back_button) -- e.g. search results' own dismiss-the-whole-plugin
+--     button, so you don't have to go back to the shelf just to close it
+--     from there.
 --   subheader = "text" -- shown below the header (and the search bar, if
 --     any) with its own hairline.
 --   search_bar = { query_text, query_hint, on_query_tap, language_label,
@@ -868,7 +955,7 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
 
   local header_widget, header_icon_btns
   if opts.back_button then
-    header_widget, header_icon_btns = buildLeadingHeader(title, width, opts.back_button, in_book)
+    header_widget, header_icon_btns = buildLeadingHeader(title, width, opts.back_button, in_book, opts.close_button)
   else
     header_widget, header_icon_btns = buildSpreadHeader(title, width, opts.header_buttons or {}, in_book)
   end
@@ -899,12 +986,14 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
 
   local rows = VerticalGroup:new{ align = "left" }
   local book_rows = {}
+  local pending_covers = {}
   for _, item in ipairs(item_table) do
     local row = BookRow:new{
       item = item,
       width = row_width,
       callback = function() on_select(item) end,
       in_book = in_book,
+      pending_covers = pending_covers,
     }
     table.insert(book_rows, row)
     table.insert(rows, row)
@@ -912,6 +1001,22 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
       dimen = Geom:new{ w = row_width, h = Size.line.thin },
       background = ROW_DIVIDER_COLOR,
     })
+  end
+
+  -- Any row whose cover isn't cached yet queued a fetch above -- doesn't
+  -- touch this screen's own widgets once downloaded (see buildCover's own
+  -- comment on why not), just warms the disk cache for next time.
+  if #pending_covers > 0 then
+    local cover_items = {}
+    for _, p in ipairs(pending_covers) do
+      table.insert(cover_items, {
+        url = p.url,
+        on_loaded = function(content)
+          CoverCache:save(p.book_id, p.url, content)
+        end,
+      })
+    end
+    CoverLoader.loadAll(cover_items)
   end
 
   -- In-book: a fixed height, the same across the shelf and the search
