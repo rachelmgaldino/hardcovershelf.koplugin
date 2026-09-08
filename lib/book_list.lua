@@ -89,6 +89,18 @@ local LEADING_TITLE_FACE_SIZE = 29
 local LEADING_BTN_SIZE = S(38)
 local LEADING_GAP = S(14)
 
+-- The in-book modal is a small centered card (as little as ~350px tall
+-- for a handful of rows, see BookList.build's own content-sized height),
+-- not a full screen -- the header padding/title size above were tuned
+-- for the full-screen shelf/search pages and read as oversized once the
+-- surrounding card shrank to fit its actual content.
+local IN_BOOK_MAX_HEIGHT_FRACTION = 0.65
+local IN_BOOK_HEADER_H_PADDING = S(14)
+local IN_BOOK_SPREAD_V_PADDING = S(10)
+local IN_BOOK_SPREAD_TITLE_FACE_SIZE = 20
+local IN_BOOK_LEADING_V_PADDING = S(10)
+local IN_BOOK_LEADING_TITLE_FACE_SIZE = 18
+
 local SUBHEADER_V_PADDING = S(8)
 local SUBHEADER_FACE_SIZE = 17
 
@@ -115,6 +127,11 @@ local COVER_LETTER_FACE_SIZE = 25
 
 local TITLE_FACE_SIZE = 20
 local AUTHOR_FACE_SIZE = 15
+-- Same "small centered card, not a full screen" reasoning as the in-book
+-- header sizes above -- these rows were tuned for the full-screen shelf/
+-- search pages, and read as oversized inside the compact in-book card.
+local IN_BOOK_TITLE_FACE_SIZE = 15
+local IN_BOOK_AUTHOR_FACE_SIZE = 12
 local TITLE_TAG_GAP = S(8)
 local STACK_GAP = S(5)
 -- Tighter than STACK_GAP -- title-to-author sits closer together than the
@@ -296,7 +313,8 @@ end
 -- single-line TextWidget can (its :getSize() reflects what's actually
 -- drawn), so that's used whenever the title fits, which every title in
 -- the design's own sample data does.
-local function buildTitleAndTag(item, width)
+local function buildTitleAndTag(item, width, in_book)
+  local title_face_size = in_book and IN_BOOK_TITLE_FACE_SIZE or TITLE_FACE_SIZE
   local tag, tag_width = nil, 0
   if item.series_tag then
     tag = buildSeriesTag(item.series_tag)
@@ -305,7 +323,7 @@ local function buildTitleAndTag(item, width)
 
   local natural_title = TextWidget:new{
     text = item.title,
-    face = Font:getFace(SERIF_BOLD, TITLE_FACE_SIZE),
+    face = Font:getFace(SERIF_BOLD, title_face_size),
   }
   local natural_w = natural_title:getSize().w
 
@@ -325,7 +343,7 @@ local function buildTitleAndTag(item, width)
     align = "left",
     TextBoxWidget:new{
       text = item.title,
-      face = Font:getFace(SERIF_BOLD, TITLE_FACE_SIZE),
+      face = Font:getFace(SERIF_BOLD, title_face_size),
       width = width,
     },
   }
@@ -336,14 +354,15 @@ local function buildTitleAndTag(item, width)
   return wrapped
 end
 
-local function buildRowText(item, width)
-  local lines = VerticalGroup:new{ align = "left", buildTitleAndTag(item, width) }
+local function buildRowText(item, width, in_book)
+  local author_face_size = in_book and IN_BOOK_AUTHOR_FACE_SIZE or AUTHOR_FACE_SIZE
+  local lines = VerticalGroup:new{ align = "left", buildTitleAndTag(item, width, in_book) }
 
   if item.author then
     table.insert(lines, VerticalSpan:new{ width = TITLE_AUTHOR_GAP })
     table.insert(lines, TextBoxWidget:new{
       text = item.author,
-      face = Font:getFace(SERIF_ITALIC, AUTHOR_FACE_SIZE),
+      face = Font:getFace(SERIF_ITALIC, author_face_size),
       fgcolor = AUTHOR_COLOR,
       width = width,
     })
@@ -392,6 +411,7 @@ local BookRow = InputContainer:extend{
   width = nil,
   callback = nil,
   show_parent = nil,
+  in_book = nil,
 }
 
 function BookRow:init()
@@ -419,7 +439,7 @@ function BookRow:init()
     -- of at the row's true right edge, since HorizontalGroup places each
     -- child using its neighbor's actual measured size.
     local text_col_width = content_width - COVER_W - ROW_GAP - CHEVRON_COL_WIDTH - ROW_GAP
-    local lines = buildRowText(self.item, text_col_width)
+    local lines = buildRowText(self.item, text_col_width, self.in_book)
     local lines_h = math.max(lines:getSize().h, COVER_H)
 
     content = HorizontalGroup:new{
@@ -530,8 +550,12 @@ end
 -- "Spread" header: left-aligned bold serif title, one or more bordered
 -- square buttons pinned to the right edge (the shelf's search/refresh/
 -- close trio). `buttons` is a list of { icon, callback }.
-local function buildSpreadHeader(title, width, buttons)
-  local inner_w = width - 2 * HEADER_H_PADDING
+local function buildSpreadHeader(title, width, buttons, in_book)
+  local h_padding = in_book and IN_BOOK_HEADER_H_PADDING or HEADER_H_PADDING
+  local v_padding = in_book and IN_BOOK_SPREAD_V_PADDING or SPREAD_V_PADDING
+  local title_face_size = in_book and IN_BOOK_SPREAD_TITLE_FACE_SIZE or SPREAD_TITLE_FACE_SIZE
+
+  local inner_w = width - 2 * h_padding
   local icon_btns = {}
   local btn_frames = {}
   local buttons_width = 0
@@ -548,7 +572,7 @@ local function buildSpreadHeader(title, width, buttons)
   local title_max_width = inner_w - buttons_width - (buttons_width > 0 and SPREAD_BTN_GAP or 0)
   local title_widget = TextWidget:new{
     text = title,
-    face = Font:getFace(SERIF_BOLD, SPREAD_TITLE_FACE_SIZE),
+    face = Font:getFace(SERIF_BOLD, title_face_size),
     max_width = title_max_width,
   }
   local row_h = math.max(title_widget:getSize().h, SPREAD_BTN_SIZE)
@@ -584,10 +608,10 @@ local function buildSpreadHeader(title, width, buttons)
   local padded = FrameContainer:new{
     bordersize = 0,
     padding = 0,
-    padding_top = SPREAD_V_PADDING,
-    padding_bottom = SPREAD_V_PADDING,
-    padding_left = HEADER_H_PADDING,
-    padding_right = HEADER_H_PADDING,
+    padding_top = v_padding,
+    padding_bottom = v_padding,
+    padding_left = h_padding,
+    padding_right = h_padding,
     margin = 0,
     width = width,
     overlap,
@@ -605,12 +629,16 @@ end
 -- picker) -- a different shape from the shelf's spread header, not the
 -- same one with fewer buttons: the title sits right next to the button
 -- here, it doesn't get pushed to the opposite edge.
-local function buildLeadingHeader(title, width, back_button)
+local function buildLeadingHeader(title, width, back_button, in_book)
+  local h_padding = in_book and IN_BOOK_HEADER_H_PADDING or HEADER_H_PADDING
+  local v_padding = in_book and IN_BOOK_LEADING_V_PADDING or LEADING_V_PADDING
+  local title_face_size = in_book and IN_BOOK_LEADING_TITLE_FACE_SIZE or LEADING_TITLE_FACE_SIZE
+
   local frame, icon_btn = buildIconButton(back_button.icon, back_button.callback, LEADING_BTN_SIZE)
   local title_widget = TextWidget:new{
     text = title,
-    face = Font:getFace(SERIF_BOLD, LEADING_TITLE_FACE_SIZE),
-    max_width = width - 2 * HEADER_H_PADDING - LEADING_BTN_SIZE - LEADING_GAP,
+    face = Font:getFace(SERIF_BOLD, title_face_size),
+    max_width = width - 2 * h_padding - LEADING_BTN_SIZE - LEADING_GAP,
   }
 
   local row = HorizontalGroup:new{
@@ -623,10 +651,10 @@ local function buildLeadingHeader(title, width, back_button)
   local padded = FrameContainer:new{
     bordersize = 0,
     padding = 0,
-    padding_top = LEADING_V_PADDING,
-    padding_bottom = LEADING_V_PADDING,
-    padding_left = HEADER_H_PADDING,
-    padding_right = HEADER_H_PADDING,
+    padding_top = v_padding,
+    padding_bottom = v_padding,
+    padding_left = h_padding,
+    padding_right = h_padding,
     margin = 0,
     width = width,
     row,
@@ -831,20 +859,18 @@ local BookList = {}
 function BookList.build(title, item_table, in_book, on_select, on_close, opts)
   opts = opts or {}
   local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
-  local width, height
+  local width
   if in_book then
     width = math.min(screen_w - S(50), S(600))
-    height = screen_h - S(50)
   else
     width = screen_w
-    height = screen_h
   end
 
   local header_widget, header_icon_btns
   if opts.back_button then
-    header_widget, header_icon_btns = buildLeadingHeader(title, width, opts.back_button)
+    header_widget, header_icon_btns = buildLeadingHeader(title, width, opts.back_button, in_book)
   else
-    header_widget, header_icon_btns = buildSpreadHeader(title, width, opts.header_buttons or {})
+    header_widget, header_icon_btns = buildSpreadHeader(title, width, opts.header_buttons or {}, in_book)
   end
 
   local header_stack = VerticalGroup:new{ align = "left", header_widget }
@@ -878,6 +904,7 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
       item = item,
       width = row_width,
       callback = function() on_select(item) end,
+      in_book = in_book,
     }
     table.insert(book_rows, row)
     table.insert(rows, row)
@@ -887,7 +914,29 @@ function BookList.build(title, item_table, in_book, on_select, on_close, opts)
     })
   end
 
-  local content_height = height - header_stack:getSize().h
+  -- In-book: size to the actual content (header + rows) instead of
+  -- always stretching to the same near-full-screen height regardless of
+  -- how many rows there are -- a shelf with two or three books was
+  -- filling almost the whole screen with empty space below them, since
+  -- rows got a lot taller in this redesign (cover placeholder, progress
+  -- bar) than the plain-text rows this sizing was originally set up for.
+  -- Capped well short of the full screen (not just screen_h - 50px) so
+  -- even a long, genuinely-scrolling result list still reads as a small
+  -- popup over the book rather than something that can grow to nearly
+  -- fill it -- a longer list scrolls inside that cap instead of pushing
+  -- the card taller. The non-in-book shelf/search pages keep filling the
+  -- full screen regardless of content, as before.
+  local header_h = header_stack:getSize().h
+  local height
+  if in_book then
+    local natural_content_h = header_h + rows:getSize().h
+    local max_content_h = math.floor(screen_h * IN_BOOK_MAX_HEIGHT_FRACTION)
+    height = math.min(natural_content_h, max_content_h)
+  else
+    height = screen_h
+  end
+
+  local content_height = height - header_h
   local scroll_container = ScrollableContainer:new{
     dimen = Geom:new{ w = width, h = content_height },
     rows,
