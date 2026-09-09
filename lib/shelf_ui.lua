@@ -2,7 +2,6 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local NetworkManager = require("ui/network/manager")
-local SpinWidget = require("ui/widget/spinwidget")
 local Trapper = require("ui/trapper")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
@@ -12,6 +11,7 @@ local BookList = require("lib/book_list")
 local CONST = require("lib/constants")
 local CoverCache = require("lib/cover_cache")
 local CoverLoader = require("lib/cover_loader")
+local RatingPicker = require("lib/rating_picker")
 local StatusPicker = require("lib/status_picker")
 
 local ShelfUI = {
@@ -254,35 +254,21 @@ function ShelfUI:_shelfItemTable(books)
   return item_table
 end
 
--- Star rating, shown only after marking a book Read. close_callback fires
--- on both Save and Cancel (spinwidget.lua's onClose path), so on_done
--- always runs -- the shelf refresh doesn't depend on whether a rating was
--- actually set.
-function ShelfUI:showRatingPicker(user_book_id, title, on_done)
-  local spinner = SpinWidget:new{
-    title_text = _("Rate: ") .. title,
-    value = 2.5,
-    value_min = 0,
-    value_max = 5,
-    value_step = 0.5,
-    value_hold_step = 2,
-    precision = "%.1f",
-    ok_text = _("Save"),
-    cancel_text = _("Skip"),
-    -- SpinWidget disables Save unless the value differs from its starting
-    -- point (spinwidget.lua: enabled = ok_always_enabled or original_value
-    -- ~= current). There's never a pre-existing rating being edited here,
-    -- so any value, including the untouched default, is a legitimate save.
-    ok_always_enabled = true,
-    callback = function(spin)
-      if not self:requireNetwork() then
-        return
+-- Star rating, shown only after marking a book Read. on_done always runs
+-- on both Save and Skip -- the shelf refresh doesn't depend on whether a
+-- rating was actually set.
+function ShelfUI:showRatingPicker(user_book_id, title, author, on_done)
+  RatingPicker.show{
+    title = title,
+    author = author,
+    on_save = function(rating)
+      if self:requireNetwork() then
+        Api:updateRating(user_book_id, rating)
       end
-      Api:updateRating(user_book_id, spin.value)
+      on_done()
     end,
-    close_callback = on_done,
+    on_skip = on_done,
   }
-  UIManager:show(spinner)
 end
 
 local STATUS_OPTIONS = {
@@ -334,7 +320,7 @@ function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
       -- Deferred until the rating picker closes, not shown here -- showing
       -- both at once left this toast sitting on top of the rating picker
       -- for its whole 2s timeout instead of the two being sequential.
-      self:showRatingPicker(result.id, title, function()
+      self:showRatingPicker(result.id, title, author, function()
         UIManager:show(InfoMessage:new{
           text = title .. ": " .. status_labels[status_id],
           timeout = 2,
@@ -535,8 +521,7 @@ function ShelfUI:_editSearchQuery(in_book)
   dialog = InputDialog:new{
     title = _("Search Hardcover"),
     input_hint = _("Title or author"),
-    -- TEMPORARY testing prefill -- remove before calling this finished.
-    input = self._search_query or "a court of thorns and roses",
+    input = self._search_query or "",
     buttons = {{
       {
         text = _("Cancel"),
