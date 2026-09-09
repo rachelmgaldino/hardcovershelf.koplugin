@@ -2,6 +2,39 @@
 
 ## 2026-09-09
 
+- Added an "Up Next" prompt: marking the last book in a series Read now
+  offers to start the next installment, auto-linking its most-read ebook
+  edition and marking it Currently Reading the same way any other status
+  change does. Resolving "next" isn't a single deterministic lookup --
+  Hardcover's own series data has one row per translation/edition-of-the-
+  work at each position, not one row per position (confirmed live against
+  a real series: position 4 of Red Rising Saga alone has 6 separate book
+  records, one English + five translations) -- so this finds the smallest
+  position after the current one, then breaks ties among whatever shares
+  that position by reader count (`books.users_count`, same field/meaning
+  already trusted for edition auto-selection; confirmed live there too:
+  3301 readers on the real book vs. single digits on every translation).
+  Skipped entirely, silently, when the book isn't in a series, there's no
+  next installment, or the next one is already tracked in some status.
+- Replaced that prompt's stock `ConfirmBox` with a custom modal
+  (`lib/next_read_prompt.lua`) matching the rest of the plugin's card/
+  backdrop/button styling instead of looking like raw KOReader chrome.
+- Fixed a real crash: cover images were decoded at full native resolution
+  before being scaled down (`ImageWidget`'s own behavior whenever
+  `scale_factor` isn't left `nil`), which stayed invisible on-device
+  (grayscale e-ink, 1 byte/pixel) but could exceed KOReader's fixed-size
+  image cache and hard-crash the app once color rendering is involved (4
+  bytes/pixel) -- reproduced running this plugin in KOReader's desktop
+  emulator. Fixed by computing the fit-within-box target size from the
+  cover's own known dimensions (already on hand from Hardcover's
+  `cached_image`) and decoding straight at that size instead.
+- Fixed a refresh flicker: any shelf refresh (a status change, the
+  refresh button, "Show more results") used to close the shelf outright
+  before re-fetching, leaving a bare loading notice over whatever's
+  underneath (the reader page, or the file manager) for however long that
+  took. The old shelf now stays on screen through the fetch and any
+  cover-loading notice, and only gets swapped for the rebuilt one right
+  before it's ready.
 - Removed the search dialog's leftover testing prefill, so it opens empty
   (or with the last-run query) instead of pre-filled with a placeholder
   title.

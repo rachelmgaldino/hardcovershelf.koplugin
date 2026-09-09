@@ -5,7 +5,7 @@
 -- being open (page/progress tracking, ratings, journal notes, edition
 -- selection, ISBN auto-link). Added: listByStatus, which doesn't exist
 -- upstream -- see hardcoverapp's getRandomToRead for the pattern this is
--- based on.
+-- based on -- and findNextInSeries, also not present upstream.
 
 local config = require("hardcovershelf_config")
 local logger = require("logger")
@@ -37,6 +37,7 @@ fragment BookParts on books {
   pages
   book_series {
     position
+    series_id
     series {
       name
     }
@@ -217,6 +218,75 @@ function HardcoverApi:hydrateBooks(ids, user_id)
 
     return list
   end
+end
+
+-- Not present upstream. Given a series and the position just finished in
+-- it, resolves the single "next" book -- for shelf_ui.lua's own "start
+-- reading the next book in the series?" prompt.
+--
+-- A series' own book_series list is NOT one row per position -- it's one
+-- row per translation/edition-of-the-work at each position (confirmed
+-- live against a real series: Red Rising Saga's position 4 alone has 6
+-- rows -- the English "Iron Gold" plus 5 separate translated books, each
+-- its own book_id, not an edition of one book_id). So this resolves in
+-- two steps: first the smallest position strictly after current_position
+-- (not simply +1 -- split-release installments use non-integer positions
+-- like 4.1), then among every book_id tied at that position, whichever
+-- has the most Hardcover readers (books carry their own users_count, same
+-- field/meaning as editions' -- confirmed live on that same real example:
+-- 3301 readers on the real English book vs. single digits on every
+-- translation, a clean win every time in practice). Compilations (box
+-- sets/omnibuses, which also show up as their own book_series row) are
+-- excluded at the query level.
+function HardcoverApi:findNextInSeries(series_id, current_position, user_id)
+  local query = [[
+    query ($seriesId: Int!) {
+      series(where: { id: { _eq: $seriesId } }) {
+        book_series(where: { compilation: { _eq: false } }, order_by: { position: asc }) {
+          position
+          book_id
+          book {
+            users_count
+          }
+        }
+      }
+    }
+  ]]
+
+  local results = self:query(query, { seriesId = series_id })
+  local series_row = results and results.series and results.series[1]
+  if not series_row or not series_row.book_series then
+    return nil
+  end
+
+  local next_position
+  for _, entry in ipairs(series_row.book_series) do
+    if entry.position and entry.position > current_position then
+      if not next_position or entry.position < next_position then
+        next_position = entry.position
+      end
+    end
+  end
+  if not next_position then
+    return nil -- current_position was the last one in the series (or the only one)
+  end
+
+  local best_book_id, best_users_count = nil, -1
+  for _, entry in ipairs(series_row.book_series) do
+    if entry.position == next_position then
+      local count = (entry.book and entry.book.users_count) or 0
+      if count > best_users_count then
+        best_users_count = count
+        best_book_id = entry.book_id
+      end
+    end
+  end
+  if not best_book_id then
+    return nil
+  end
+
+  local books = self:hydrateBooks({ best_book_id }, user_id)
+  return books and books[1]
 end
 
 function HardcoverApi:search(title, author, userId, page)

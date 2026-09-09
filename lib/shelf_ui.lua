@@ -11,6 +11,7 @@ local BookList = require("lib/book_list")
 local CONST = require("lib/constants")
 local CoverCache = require("lib/cover_cache")
 local CoverLoader = require("lib/cover_loader")
+local NextReadPrompt = require("lib/next_read_prompt")
 local RatingPicker = require("lib/rating_picker")
 local StatusPicker = require("lib/status_picker")
 
@@ -115,10 +116,17 @@ local function bookListItem(book)
     cover_w = book.cached_image.width
     cover_h = book.cached_image.height
   end
+  -- Same book_series[1] convention as seriesLabel above -- the "primary"
+  -- series entry this book's own row already displays a tag for. Threaded
+  -- through status-picker calls so markRead (further down) can look up
+  -- what comes next in it once this book's marked Read.
+  local series_entry = book.book_series and book.book_series[1]
   return {
     title = book.title,
     author = mainAuthor(book),
     series_tag = seriesLabel(book),
+    series_id = series_entry and series_entry.series_id,
+    series_position = series_entry and series_entry.position,
     book_id = book.book_id,
     pages = book.pages,
     reading_progress = book.reading_progress,
@@ -231,11 +239,10 @@ end
 -- No live in-place update on this custom list (unlike stock Menu's
 -- switchItemTable), so refreshing the shelf means closing and rebuilding
 -- it -- simple, and the shelf is cheap enough to rebuild that this isn't
--- worth optimizing away.
+-- worth optimizing away. show() itself is what actually closes the old
+-- widget now (right before opening the new one, not up front) -- see its
+-- own comment for why.
 function ShelfUI:_refreshShelf()
-  if self._shelf_widget then
-    UIManager:close(self._shelf_widget, "full")
-  end
   self:show(self._in_book)
 end
 
@@ -254,6 +261,46 @@ function ShelfUI:_shelfItemTable(books)
   return item_table
 end
 
+-- Shared by every status-change path that actually commits (the status
+-- picker's own Done-confirmed branch, markRead below, and
+-- _startReadingNext further down for the "start the next book in the
+-- series" prompt): sends the mutation, shows the success/failure toast,
+-- and plants a reading session the moment a book is marked Currently
+-- Reading, instead of leaving the shelf's progress bar/meta line blank
+-- until you happen to log a real update on Hardcover's own site or app --
+-- that's the only reason no info showed up there earlier, not a fetch bug
+-- (confirmed by updating progress on the site and watching it appear
+-- immediately). No page count passed -- Hardcover normalizes an explicit
+-- 0 to null server-side anyway (confirmed live: a session created with
+-- progress_pages=0 came back null), and lib/book_list.lua's own progress
+-- display already treats a nil progress_pages as 0% once a session
+-- exists, so there's nothing a literal 0 would add. Only when nothing's
+-- logged yet (result.user_book_reads, from the mutation's own response,
+-- is this user_book's existing most-recent session if any) -- otherwise
+-- re-affirming Currently Reading on a book you already have real progress
+-- on would bury it under a fresh empty one. Returns the mutation's own
+-- result (nil on failure, after already showing the error toast).
+function ShelfUI:_commitStatus(book_id, title, status_id, edition_id)
+  local result = Api:updateUserBook(book_id, status_id, nil, edition_id)
+  if not result then
+    UIManager:show(InfoMessage:new{
+      text = _("Could not update status. Try again."),
+      icon = "notice-warning",
+    })
+    return nil
+  end
+
+  if status_id == CONST.STATUS.READING and not (result.user_book_reads and result.user_book_reads[1]) then
+    Api:createRead(result.id, edition_id, nil, os.date("%Y-%m-%d"))
+  end
+
+  UIManager:show(InfoMessage:new{
+    text = title .. ": " .. status_labels[status_id],
+    timeout = 2,
+  })
+  return result
+end
+
 local STATUS_OPTIONS = {
   { id = CONST.STATUS.TO_READ, label = status_labels[CONST.STATUS.TO_READ] },
   { id = CONST.STATUS.READING, label = status_labels[CONST.STATUS.READING] },
@@ -261,7 +308,11 @@ local STATUS_OPTIONS = {
   { id = CONST.STATUS.DNF, label = status_labels[CONST.STATUS.DNF] },
 }
 
-function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
+-- series_id/series_position (from bookListItem, above) are optional --
+-- only present when this book has one -- and only ever matter for the
+-- FINISHED branch below, offering to start the next book in the series
+-- once this one's marked Read.
+function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done, series_id, series_position)
   -- Every other status commits the moment its Done tap reaches here (see
   -- the plain branch of pick() below). Read is the one exception: tapping
   -- its tile auto-advances straight into the rating picker (read_id below)
@@ -276,39 +327,37 @@ function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
     -- on being online -- only the actual commit needs a connection.
     local function commit(rating)
       if not self:requireNetwork() then
-        return
-      end
-      local result = Api:updateUserBook(book_id, CONST.STATUS.FINISHED, nil, edition_id)
-      if not result then
-        UIManager:show(InfoMessage:new{
-          text = _("Could not update status. Try again."),
-          icon = "notice-warning",
-        })
-        return
-      end
-      if rating then
-        Api:updateRating(result.id, rating)
+        return nil
       end
       -- Deferred until the rating picker closes, not shown alongside it --
       -- showing both at once left this toast sitting on top of the rating
       -- picker for its whole 2s timeout instead of the two being
       -- sequential.
-      UIManager:show(InfoMessage:new{
-        text = title .. ": " .. status_labels[CONST.STATUS.FINISHED],
-        timeout = 2,
-      })
+      local result = self:_commitStatus(book_id, title, CONST.STATUS.FINISHED, edition_id)
+      if result and rating then
+        Api:updateRating(result.id, rating)
+      end
+      return result
     end
 
     RatingPicker.show{
       title = title,
       author = author,
       on_save = function(rating)
-        commit(rating)
-        on_done()
+        local result = commit(rating)
+        if result then
+          self:_maybeOfferNextInSeries(series_id, series_position, on_done)
+        else
+          on_done()
+        end
       end,
       on_skip = function()
-        commit(nil)
-        on_done()
+        local result = commit(nil)
+        if result then
+          self:_maybeOfferNextInSeries(series_id, series_position, on_done)
+        else
+          on_done()
+        end
       end,
       -- on_cancel: nothing sent, nothing changed -- on_done isn't called
       -- either, same as StatusPicker's own cancel path (no on_cancel
@@ -327,39 +376,7 @@ function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
       return
     end
 
-    local result = Api:updateUserBook(book_id, status_id, nil, edition_id)
-    if not result then
-      UIManager:show(InfoMessage:new{
-        text = _("Could not update status. Try again."),
-        icon = "notice-warning",
-      })
-      on_done()
-      return
-    end
-
-    -- Plants a reading session the moment a book is marked Currently
-    -- Reading, instead of leaving the shelf's progress bar/meta line
-    -- blank until you happen to log a real update on Hardcover's own site
-    -- or app -- that's the only reason no info showed up there earlier,
-    -- not a fetch bug (confirmed by updating progress on the site and
-    -- watching it appear immediately). No page count passed -- Hardcover
-    -- normalizes an explicit 0 to null server-side anyway (confirmed
-    -- live: a session created with progress_pages=0 came back null), and
-    -- lib/book_list.lua's own progress display already treats a nil
-    -- progress_pages as 0% once a session exists, so there's nothing a
-    -- literal 0 would add. Only when nothing's logged yet
-    -- (result.user_book_reads, from the mutation's own response, is this
-    -- user_book's existing most-recent session if any) -- otherwise
-    -- re-affirming Currently Reading on a book you already have real
-    -- progress on would bury it under a fresh empty one.
-    if status_id == CONST.STATUS.READING and not (result.user_book_reads and result.user_book_reads[1]) then
-      Api:createRead(result.id, edition_id, nil, os.date("%Y-%m-%d"))
-    end
-
-    UIManager:show(InfoMessage:new{
-      text = title .. ": " .. status_labels[status_id],
-      timeout = 2,
-    })
+    self:_commitStatus(book_id, title, status_id, edition_id)
     on_done()
   end
 
@@ -471,12 +488,6 @@ function ShelfUI:chooseSearchLanguage(in_book)
   end)
 end
 
--- Only for books being newly added from search -- an already-linked shelf
--- book keeps whatever edition it was originally linked with; changing that
--- later is out of scope for now (Hardcover's upsert semantics for omitting
--- edition_id on an existing link aren't confirmed, so this deliberately
--- doesn't touch it).
---
 -- Auto-links the matching edition with the most Hardcover readers,
 -- instead of making you pick between several near-duplicate ebook
 -- editions of the same book by hand: findEditions already orders its
@@ -488,14 +499,11 @@ end
 -- (their database is younger than Goodreads', so this happens), fall
 -- back to every edition (still most-read first) and say so explicitly,
 -- so a print/audio pick reads as "nothing else was available" rather
--- than a bug.
-function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done, language_filter)
+-- than a bug. Returns edition_id, or nil if this book has no editions at
+-- all; a second return value, when present, is a notice to show the user
+-- about a fallback that was taken (never an error by itself).
+function ShelfUI:_resolveEbookEdition(book_id, language_filter)
   language_filter = language_filter or DEFAULT_LANGUAGE
-
-  if not self:requireNetwork() then
-    on_done()
-    return
-  end
 
   local all_editions = Api:findEditions(book_id) or {}
   local ebook_editions = filterByFormat(all_editions, EBOOK_FORMAT_ID)
@@ -514,20 +522,120 @@ function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done,
       editions = all_editions
     end
     if #editions == 0 then
-      UIManager:show(InfoMessage:new{
-        text = _("No editions found for this book."),
-        icon = "notice-warning",
-      })
-      on_done()
-      return
+      return nil
     end
-    UIManager:show(InfoMessage:new{
-      text = _("No ebook/Kindle edition found for this book -- using the most-read other format instead."),
-      timeout = 3,
-    })
+    return editions[1].id, _("No ebook/Kindle edition found for this book -- using the most-read other format instead.")
   end
 
-  self:showStatusPicker(book_id, title, author, editions[1].id, on_done)
+  return editions[1].id
+end
+
+-- Only for books being newly added from search -- an already-linked shelf
+-- book keeps whatever edition it was originally linked with; changing that
+-- later is out of scope for now (Hardcover's upsert semantics for omitting
+-- edition_id on an existing link aren't confirmed, so this deliberately
+-- doesn't touch it).
+function ShelfUI:pickEditionThenStatus(book_id, title, author, in_book, on_done, language_filter, series_id, series_position)
+  if not self:requireNetwork() then
+    on_done()
+    return
+  end
+
+  local edition_id, notice = self:_resolveEbookEdition(book_id, language_filter)
+  if not edition_id then
+    UIManager:show(InfoMessage:new{
+      text = _("No editions found for this book."),
+      icon = "notice-warning",
+    })
+    on_done()
+    return
+  end
+  if notice then
+    UIManager:show(InfoMessage:new{ text = notice, timeout = 3 })
+  end
+
+  self:showStatusPicker(book_id, title, author, edition_id, on_done, series_id, series_position)
+end
+
+-- The "start reading the next book in the series?" prompt, offered right
+-- after markRead's commit succeeds. Silently does nothing (just calls
+-- on_done) when: this book isn't in a series, there's no next book (it
+-- was the last one, or the lookup fails), or the next book is already
+-- tracked in some status -- the last check reuses the same user_books
+-- existence field every other book fetch already carries, so a book
+-- that's already Want to Read/Reading/Read/DNF is never re-prompted or
+-- clobbered.
+function ShelfUI:_maybeOfferNextInSeries(series_id, series_position, on_done)
+  if not series_id or not series_position then
+    on_done()
+    return
+  end
+  if not self:requireNetwork() then
+    on_done()
+    return
+  end
+
+  local user_id = Api:getUserId()
+  if not user_id then
+    on_done()
+    return
+  end
+
+  local next_book = Api:findNextInSeries(series_id, series_position, user_id)
+  if not next_book then
+    on_done()
+    return
+  end
+  if next_book.user_books and next_book.user_books[1] then
+    on_done()
+    return
+  end
+
+  local next_title = next_book.title
+  local next_author = mainAuthor(next_book)
+
+  -- Custom card/backdrop modal (lib/next_read_prompt.lua), not a stock
+  -- ConfirmBox -- a plain ConfirmBox is raw KOReader chrome that looks out
+  -- of place next to every other screen in this plugin. Not Now, the
+  -- close (X), and a tap outside the card all route to on_cancel = on_done
+  -- (nothing to send either way -- there's no partial state here the way
+  -- the rating picker has to distinguish Skip from cancel).
+  NextReadPrompt.show{
+    title = next_title,
+    author = next_author,
+    on_start = function()
+      self:_startReadingNext(next_book.book_id, next_title, on_done)
+    end,
+    on_cancel = on_done,
+  }
+end
+
+-- Marks the next book in the series Currently Reading, same edition
+-- auto-selection as pickEditionThenStatus (language always defaults --
+-- there's no per-book override to ask for here, this isn't a screen the
+-- user navigated to) and the same commit/session-plant/toast as every
+-- other status change, via _commitStatus.
+function ShelfUI:_startReadingNext(book_id, title, on_done)
+  if not self:requireNetwork() then
+    on_done()
+    return
+  end
+
+  local edition_id, notice = self:_resolveEbookEdition(book_id)
+  if not edition_id then
+    UIManager:show(InfoMessage:new{
+      text = _("No editions found for this book."),
+      icon = "notice-warning",
+    })
+    on_done()
+    return
+  end
+  if notice then
+    UIManager:show(InfoMessage:new{ text = notice, timeout = 3 })
+  end
+
+  self:_commitStatus(book_id, title, CONST.STATUS.READING, edition_id)
+  on_done()
 end
 
 -- Opens a plain InputDialog (the same popup search always used) prefilled
@@ -680,7 +788,7 @@ function ShelfUI:showSearchPage(in_book)
       UIManager:close(opened.widget, "full")
       self:pickEditionThenStatus(item.book_id, item.title, item.author, in_book, function()
         self:_refreshShelf()
-      end, self._search_language)
+      end, self._search_language, item.series_id, item.series_position)
     end, opts)
     self._search_widget = opened.widget
   end)
@@ -690,6 +798,13 @@ end
 -- a pinned row to search and add a book -- everything else (search,
 -- edition pick, status pick, rating) opens as an overlay stacked on top of
 -- this page, which is never closed until the whole thing is dismissed.
+-- Keeps whatever shelf widget is already on screen up (a stale one, on a
+-- refresh) through the network fetch and any cover-loading notice, only
+-- closing it right before the freshly-rebuilt one opens -- rather than
+-- closing it up front and leaving nothing but a bare loading notice over
+-- the reader/file-manager page underneath for however long the fetch
+-- takes. Same "full" refresh on the actual swap as always, so nothing
+-- ghosts through from the old widget having sat there the whole time.
 function ShelfUI:show(in_book)
   self._in_book = in_book
 
@@ -707,6 +822,7 @@ function ShelfUI:show(in_book)
   end
 
   local books = Api:listByStatus(CONST.STATUS.READING, user_id) or {}
+  local previous_widget = self._shelf_widget
 
   prefetchCoversThen(books, function()
     local subheader = string.format(_("Currently Reading - %d books"), #books)
@@ -720,6 +836,10 @@ function ShelfUI:show(in_book)
       subheader = subheader,
     }
 
+    if previous_widget then
+      UIManager:close(previous_widget, "full")
+    end
+
     local opened = self:_openOverlayList(_("Hardcover Shelf"), self:_shelfItemTable(books), in_book, function(item)
       if item.row_id == EMPTY_ROW_ID then
         self:_refreshShelf()
@@ -727,7 +847,7 @@ function ShelfUI:show(in_book)
       end
       self:showStatusPicker(item.book_id, item.title, item.author, nil, function()
         self:_refreshShelf()
-      end)
+      end, item.series_id, item.series_position)
     end, opts)
     self._shelf_widget = opened.widget
   end)

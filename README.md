@@ -27,6 +27,7 @@ Open `hardcovershelf_config.lua` and paste in a Hardcover API token, replacing t
 - **Rating prompt**: marking a book Read opens a star rating picker (half-star steps) in its place. The status change itself isn't sent until this screen resolves — Skip or Save Rating confirm it, closing any other way cancels the whole thing, so Read gets the same tap-then-confirm safety net every other status already has, just via this screen instead of a separate Done button.
 - **Context-aware presentation**: opens as a centered overlay on top of the page being read when inside a book, and as a true fullscreen page when opened from the file manager, matching how Rakuyomi's own library view presents itself there.
 - **Series display**: a book that's part of a series shows its position and series name alongside the title and author.
+- **"Up Next" prompt**: finishing a book that's part of a series offers to start the next installment right away — same automatic ebook edition selection as adding a book from search, no need to go find and search for it yourself.
 
 ## How it works
 
@@ -43,6 +44,8 @@ Marking a book Currently Reading also plants an empty reading session for it if 
 Marking Read is handled a little differently from the other three statuses: nothing is sent to Hardcover until the rating picker resolves. Skip or Save Rating both confirm it (Save also writes the rating, including 0); closing the picker any other way cancels the status change entirely. The half-star fill is three literal glyphs (full/half/empty), not a partial-width clip — KOReader's own bundled `nerdfonts/symbols.ttf` already ships a genuine half-filled star character, so each star just swaps which whole glyph it shows rather than compositing one.
 
 A book that's part of a series shows its position and series name as a rounded-corner tag next to the title and author. It deliberately doesn't show a "book N of M" total the way Hardcover's own site does: release-date data in the underlying catalog has a real ambiguity between "exact release day unknown" and "placeholder for an unconfirmed future book" that no field distinguishes, so a computed total would be right most of the time and silently wrong the rest of the time.
+
+Resolving "the next book" for the Up Next prompt isn't a single lookup: a series' own book list on Hardcover has one row per translation/edition-of-the-work at each position, not one row per position, so multiple distinct books can share the same position number. The next book is whichever one, among every book_id tied at the smallest position after the current one, has the most Hardcover readers — the same reader-count tiebreak already used for edition selection, just one level up. The prompt is skipped silently whenever there's no next book, or it's already tracked in some status.
 
 ## Known v1 limitations
 
@@ -69,6 +72,7 @@ hardcovershelf.koplugin/
     ├── book_list.lua                (custom scrollable list widget)
     ├── status_picker.lua            (status-change modal)
     ├── rating_picker.lua            (star-rating modal)
+    ├── next_read_prompt.lua         ("start the next book?" modal)
     └── shelf_ui.lua                 (every screen: shelf, search, status
-                                       picker, rating)
+                                       picker, rating, up next)
 ```

@@ -219,25 +219,48 @@ local function buildCoverPlaceholder(title)
   }
 end
 
--- Real cover when it's already been fetched and cached to disk (a plain
--- ImageWidget, scale_factor=0 so it's fit-within-bounds keeping its own
--- aspect ratio rather than stretched to exactly COVER_W x COVER_H);
--- otherwise the letter placeholder, plus a descriptor for the caller to
--- queue a background fetch so the *next* time this book's row is built,
--- its real cover is already on disk. No live swap-in on THIS view once
--- the fetch finishes -- rebuilding the on-screen row from inside an
--- async callback risks corrupting whatever ScrollableContainer/e-ink
--- partial-refresh state is live at that moment, which isn't something
--- worth risking blind, without a device to actually watch it happen on.
--- A cover that's slow to appear (next open, not this one) is a small
--- price for that.
+-- Real cover when it's already been fetched and cached to disk; otherwise
+-- the letter placeholder, plus a descriptor for the caller to queue a
+-- background fetch so the *next* time this book's row is built, its real
+-- cover is already on disk. No live swap-in on THIS view once the fetch
+-- finishes -- rebuilding the on-screen row from inside an async callback
+-- risks corrupting whatever ScrollableContainer/e-ink partial-refresh
+-- state is live at that moment, which isn't something worth risking
+-- blind, without a device to actually watch it happen on. A cover that's
+-- slow to appear (next open, not this one) is a small price for that.
+--
+-- Fit-within-box target size is computed here, from the cover's own real
+-- pixel dimensions (item.cover_w/cover_h, straight from Hardcover's own
+-- cached_image -- already on hand, no extra fetch), rather than asking
+-- ImageWidget to do it itself via scale_factor=0. That distinction is a
+-- real crash fix, not a style choice: ImageWidget only forwards width/
+-- height into the actual image decoder when scale_factor is nil
+-- (confirmed in ui/widget/imagewidget.lua's own _loadfile -- scale_factor
+-- ~= nil means it can't yet know the aspect ratio, so it decodes at full
+-- native resolution first and scales down after). A high-res cover
+-- decoded at full size into a 32-bit color buffer can outright exceed
+-- KOReader's own fixed-size image cache and hard-crash the whole app
+-- (confirmed live: "not enough storage for cache" from ffi/lru.lua,
+-- reproduced running this plugin in the desktop emulator, whose color
+-- framebuffer holds 4x the bytes per pixel a real e-ink Kindle's
+-- grayscale one does for the same image -- which is also why this went
+-- unnoticed on-device). Computing the target size ourselves and passing
+-- it with scale_factor left nil gets the decoder to work at that reduced
+-- size from the start, the same size either way since the aspect ratio's
+-- already known.
 local function buildCover(item)
   if item.cover_url and CoverCache:isCached(item.book_id, item.cover_url) then
+    local box_w, box_h = COVER_W - 2 * BORDER, COVER_H - 2 * BORDER
+    local target_w, target_h = box_w, box_h
+    if item.cover_w and item.cover_h and item.cover_w > 0 and item.cover_h > 0 then
+      local fit = math.min(box_w / item.cover_w, box_h / item.cover_h)
+      target_w = math.max(1, math.floor(item.cover_w * fit))
+      target_h = math.max(1, math.floor(item.cover_h * fit))
+    end
     local image = ImageWidget:new{
       file = CoverCache:path(item.book_id, item.cover_url),
-      width = COVER_W - 2 * BORDER,
-      height = COVER_H - 2 * BORDER,
-      scale_factor = 0,
+      width = target_w,
+      height = target_h,
     }
     return FrameContainer:new{
       bordersize = BORDER,
@@ -249,7 +272,7 @@ local function buildCover(item)
       width = COVER_W,
       height = COVER_H,
       CenterContainer:new{
-        dimen = Geom:new{ w = COVER_W - 2 * BORDER, h = COVER_H - 2 * BORDER },
+        dimen = Geom:new{ w = box_w, h = box_h },
         image,
       },
     }, nil
