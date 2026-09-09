@@ -24,7 +24,7 @@ Open `hardcovershelf_config.lua` and paste in a Hardcover API token, replacing t
 - **Search and add a book**: a header icon opens a dedicated search page (query and language shown as their own row, tap either to change them) with results paged in five at a time.
 - **Automatic edition selection**: newly-added books link straight to whichever ebook edition has the most Hardcover readers, rather than making you pick between several near-duplicate editions of the same book by hand, or letting Hardcover's own API silently default to whichever it likes (the original bug report: a test add landed on an audiobook edition with no way to choose otherwise). Falls back to other formats or languages, with an on-screen notice, when no ebook edition exists yet.
 - **Status change**: the same four statuses (Want to Read, Currently Reading, Read, Did Not Finish) `hardcoverapp.koplugin` itself offers, through a modal that mirrors Hardcover's own tap-to-select-then-confirm flow rather than committing the moment you tap a status.
-- **Rating prompt**: marking a book Read shows a star rating picker right after.
+- **Rating prompt**: marking a book Read opens a star rating picker (half-star steps) in its place. The status change itself isn't sent until this screen resolves — Skip or Save Rating confirm it, closing any other way cancels the whole thing, so Read gets the same tap-then-confirm safety net every other status already has, just via this screen instead of a separate Done button.
 - **Context-aware presentation**: opens as a centered overlay on top of the page being read when inside a book, and as a true fullscreen page when opened from the file manager, matching how Rakuyomi's own library view presents itself there.
 - **Series display**: a book that's part of a series shows its position and series name alongside the title and author.
 
@@ -39,6 +39,8 @@ Adding a book from search fetches every edition Hardcover has for it, narrows to
 Cover art is fetched from Hardcover's own `cached_image` field and cached to disk, one file per book. Covers are downloaded *before* a list is shown, not after: an earlier version showed the list immediately with placeholders and warmed the cache for next time, which works fine for the shelf but does almost nothing useful for search results, since a search is rarely run again with the exact same results. Search only prefetches and shows its first five results for the same reason — blocking on covers for results not even visible yet was the actual slow part, not the search itself — with a row to reveal (and prefetch) further pages of what's already been fetched.
 
 Marking a book Currently Reading also plants an empty reading session for it if it doesn't already have one, via a mutation adapted from `hardcoverapp.koplugin`'s own progress-tracking code. Without one, the shelf has nothing to show a progress bar or start date for until a real page-count update gets logged somewhere, on Hardcover's site or app; this plugin doesn't track reading position at all, so it only ever plants a bare marker, never a real progress number.
+
+Marking Read is handled a little differently from the other three statuses: nothing is sent to Hardcover until the rating picker resolves. Skip or Save Rating both confirm it (Save also writes the rating, including 0); closing the picker any other way cancels the status change entirely. The half-star fill is three literal glyphs (full/half/empty), not a partial-width clip — KOReader's own bundled `nerdfonts/symbols.ttf` already ships a genuine half-filled star character, so each star just swaps which whole glyph it shows rather than compositing one.
 
 A book that's part of a series shows its position and series name as a rounded-corner tag next to the title and author. It deliberately doesn't show a "book N of M" total the way Hardcover's own site does: release-date data in the underlying catalog has a real ambiguity between "exact release day unknown" and "placeholder for an unconfirmed future book" that no field distinguishes, so a computed total would be right most of the time and silently wrong the rest of the time.
 
@@ -66,6 +68,7 @@ hardcovershelf.koplugin/
     ├── cover_loader.lua             (background/blocking cover downloads)
     ├── book_list.lua                (custom scrollable list widget)
     ├── status_picker.lua            (status-change modal)
+    ├── rating_picker.lua            (star-rating modal)
     └── shelf_ui.lua                 (every screen: shelf, search, status
                                        picker, rating)
 ```

@@ -1,13 +1,24 @@
 --[[--
-"Rate this Book" modal, shown only right after marking a book Read (see
-shelf_ui.lua's own showStatusPicker -> pick(), the "marking_read" branch).
-Matches the design handoff's own rating screen: 5 stars in half-star
-steps, a live "X / 5" readout, and Skip/Save Rating buttons -- Skip closes
-without ever calling the API (no rating recorded), Save always writes
-whatever value is currently selected, including 0 (the design's own Save
-button is never disabled, even at the untouched 0 default -- confirmed
-against the mockup's own renderVals(), which never gates saveRating on
-rating > 0).
+"Rate this Book" modal, shown right after picking Read in the status
+picker (see shelf_ui.lua's own showStatusPicker -> pick()). Matches the
+design handoff's own rating screen: 5 stars in half-star steps, a live
+"X / 5" readout, and Skip/Save Rating buttons.
+
+This screen doubles as the confirmation step for the status change
+itself -- unlike every other status, Read has no separate Done button
+(status_picker.lua auto-advances straight here instead), so shelf_ui.lua
+defers the actual "mark as read" mutation until this screen resolves,
+rather than firing it the moment the Read tile is tapped. That's why
+on_save/on_skip/on_cancel are three genuinely different outcomes, not
+three names for the same "close" action:
+  - Save Rating (on_save) -- confirms the status change AND records a
+    rating, even 0 (the design's own Save button is never disabled, even
+    at the untouched 0 default -- confirmed against the mockup's own
+    renderVals(), which never gates saveRating on rating > 0).
+  - Skip (on_skip) -- confirms the status change, no rating recorded.
+  - The close (X) or a tap outside the card (on_cancel) -- backs out of
+    the whole thing; shelf_ui.lua sends nothing to the API for either of
+    these.
 
 Card/backdrop plumbing (DarkenOverlay, the OverlapGroup-centered card,
 tap-outside-to-dismiss) is the same recipe lib/status_picker.lua already
@@ -307,8 +318,12 @@ local RatingPicker = InputContainer:extend{
   book_title = nil,
   book_author = nil,
   rating = 0, -- internal, starts untouched at 0 same as the design's own chooseStatus('read') reset
-  on_save = nil, -- (rating) -- Save Rating tapped
-  on_skip = nil, -- Skip, the close (X), or a tap outside the card
+  on_save = nil, -- (rating) -- Save Rating tapped: a real confirm, with a rating
+  on_cancel = nil, -- the close (X) or a tap outside the card -- backs out of the
+    -- whole action (e.g. the status change this screen is gating), same as
+    -- StatusPicker's own on_cancel. Distinct from on_skip below: closing
+    -- this way must not be treated as "confirmed, just without a rating".
+  on_skip = nil, -- Skip tapped -- a real confirm, just without a rating
 }
 
 function RatingPicker:init()
@@ -354,14 +369,14 @@ function RatingPicker:init()
 end
 
 function RatingPicker:onTapOutsideCard()
-  self:_skip()
+  self:_cancel()
   return true
 end
 
 function RatingPicker:_buildCardContent(content_w)
   return VerticalGroup:new{
     align = "center",
-    buildHeader(content_w, function() self:_skip() end),
+    buildHeader(content_w, function() self:_cancel() end),
     VerticalSpan:new{ width = GROUP_GAP },
     buildTitleBlock(content_w, self.book_title, self.book_author),
     VerticalSpan:new{ width = GROUP_GAP },
@@ -405,15 +420,22 @@ function RatingPicker:_skip()
   end
 end
 
+function RatingPicker:_cancel()
+  self:_close()
+  if self.on_cancel then
+    self.on_cancel()
+  end
+end
+
 function RatingPicker:_close()
   UIManager:close(self, "full")
 end
 
 local M = {}
 
--- opts: { title, author, on_save, on_skip }. Shows and returns the
--- widget; the caller doesn't need to hold onto it for anything (it closes
--- itself).
+-- opts: { title, author, on_save, on_skip, on_cancel }. Shows and returns
+-- the widget; the caller doesn't need to hold onto it for anything (it
+-- closes itself).
 function M.show(opts)
   local picker = RatingPicker:new{
     book_title = opts.title,
@@ -421,6 +443,7 @@ function M.show(opts)
     rating = 0,
     on_save = opts.on_save,
     on_skip = opts.on_skip,
+    on_cancel = opts.on_cancel,
   }
   UIManager:show(picker, "full")
   return picker

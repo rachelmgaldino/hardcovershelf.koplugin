@@ -254,23 +254,6 @@ function ShelfUI:_shelfItemTable(books)
   return item_table
 end
 
--- Star rating, shown only after marking a book Read. on_done always runs
--- on both Save and Skip -- the shelf refresh doesn't depend on whether a
--- rating was actually set.
-function ShelfUI:showRatingPicker(user_book_id, title, author, on_done)
-  RatingPicker.show{
-    title = title,
-    author = author,
-    on_save = function(rating)
-      if self:requireNetwork() then
-        Api:updateRating(user_book_id, rating)
-      end
-      on_done()
-    end,
-    on_skip = on_done,
-  }
-end
-
 local STATUS_OPTIONS = {
   { id = CONST.STATUS.TO_READ, label = status_labels[CONST.STATUS.TO_READ] },
   { id = CONST.STATUS.READING, label = status_labels[CONST.STATUS.READING] },
@@ -279,15 +262,72 @@ local STATUS_OPTIONS = {
 }
 
 function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
+  -- Every other status commits the moment its Done tap reaches here (see
+  -- the plain branch of pick() below). Read is the one exception: tapping
+  -- its tile auto-advances straight into the rating picker (read_id below)
+  -- with nothing sent yet -- Skip or Save Rating there is what actually
+  -- fires the "mark as read" mutation (+ rating, for Save), and closing
+  -- that screen any other way (the X, or a tap outside the card) cancels
+  -- the whole thing: nothing is sent to Hardcover, the book's status
+  -- doesn't change, same as cancelling out of this status picker itself.
+  local function markRead()
+    -- requireNetwork() isn't checked until here (not when the rating
+    -- picker opens): opening it is just local UI, no reason to gate that
+    -- on being online -- only the actual commit needs a connection.
+    local function commit(rating)
+      if not self:requireNetwork() then
+        return
+      end
+      local result = Api:updateUserBook(book_id, CONST.STATUS.FINISHED, nil, edition_id)
+      if not result then
+        UIManager:show(InfoMessage:new{
+          text = _("Could not update status. Try again."),
+          icon = "notice-warning",
+        })
+        return
+      end
+      if rating then
+        Api:updateRating(result.id, rating)
+      end
+      -- Deferred until the rating picker closes, not shown alongside it --
+      -- showing both at once left this toast sitting on top of the rating
+      -- picker for its whole 2s timeout instead of the two being
+      -- sequential.
+      UIManager:show(InfoMessage:new{
+        text = title .. ": " .. status_labels[CONST.STATUS.FINISHED],
+        timeout = 2,
+      })
+    end
+
+    RatingPicker.show{
+      title = title,
+      author = author,
+      on_save = function(rating)
+        commit(rating)
+        on_done()
+      end,
+      on_skip = function()
+        commit(nil)
+        on_done()
+      end,
+      -- on_cancel: nothing sent, nothing changed -- on_done isn't called
+      -- either, same as StatusPicker's own cancel path (no on_cancel
+      -- wired below), since the list page underneath never went stale.
+    }
+  end
+
   local function pick(status_id)
+    if status_id == CONST.STATUS.FINISHED then
+      markRead()
+      return
+    end
+
     if not self:requireNetwork() then
       on_done()
       return
     end
 
     local result = Api:updateUserBook(book_id, status_id, nil, edition_id)
-    local marking_read = result and status_id == CONST.STATUS.FINISHED
-
     if not result then
       UIManager:show(InfoMessage:new{
         text = _("Could not update status. Try again."),
@@ -316,24 +356,11 @@ function ShelfUI:showStatusPicker(book_id, title, author, edition_id, on_done)
       Api:createRead(result.id, edition_id, nil, os.date("%Y-%m-%d"))
     end
 
-    if marking_read then
-      -- Deferred until the rating picker closes, not shown here -- showing
-      -- both at once left this toast sitting on top of the rating picker
-      -- for its whole 2s timeout instead of the two being sequential.
-      self:showRatingPicker(result.id, title, author, function()
-        UIManager:show(InfoMessage:new{
-          text = title .. ": " .. status_labels[status_id],
-          timeout = 2,
-        })
-        on_done()
-      end)
-    else
-      UIManager:show(InfoMessage:new{
-        text = title .. ": " .. status_labels[status_id],
-        timeout = 2,
-      })
-      on_done()
-    end
+    UIManager:show(InfoMessage:new{
+      text = title .. ": " .. status_labels[status_id],
+      timeout = 2,
+    })
+    on_done()
   end
 
   StatusPicker.show{

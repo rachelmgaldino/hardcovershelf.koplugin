@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-09
+
+- Removed the search dialog's leftover testing prefill, so it opens empty
+  (or with the last-run query) instead of pre-filled with a placeholder
+  title.
+- Replaced the rating prompt's `SpinWidget` stub with a custom star-rating
+  modal (`lib/rating_picker.lua`) matching the design handoff: five stars
+  in half-star steps, a live "X / 5" readout, and Skip/Save Rating
+  buttons. Half-star fill uses three literal glyphs (full/half/empty) from
+  KOReader's own bundled `nerdfonts/symbols.ttf` symbols font, rather than
+  the design's own CSS clip trick (stacking two full stars and cropping
+  the top one's box) -- the font already ships a genuine half-filled star
+  character, so no compositing is needed, just swapping which glyph
+  renders per star.
+- Marking a book Read now defers its status-change mutation until the
+  rating picker resolves, instead of firing the moment the Read tile is
+  tapped: Skip or Save Rating both confirm it (Save also writes the
+  rating, including 0), while closing the rating picker any other way (the
+  X, or a tap outside the card) cancels the whole thing -- no status
+  change, no rating, same as cancelling out of the status picker itself.
+  Every other status already worked this way via its own Done button;
+  Read was the one exception, since it auto-advances straight past that
+  button into the rating picker.
+
 ## 2026-09-07
 
 - Initial build: standalone Tools-menu entry, single-page Currently
